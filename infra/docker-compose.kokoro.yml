@@ -1,0 +1,33 @@
+# Optional high-traffic TTS. Retrieval and reasoning stay unchanged.
+# docker compose -f infra/docker-compose.yml -f infra/docker-compose.kokoro.yml up
+services:
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.4.0
+    ports:
+      - "8880:8880"
+    environment:
+      DOWNLOAD_MODEL: "true"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/health')",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    environment:
+      TTS_PROVIDER: kokoro
+      KOKORO_URL: http://kokoro:8880
+
+  agent:
+    environment:
+      TTS_PROVIDER: kokoro
+      KOKORO_URL: http://kokoro:8880
+    depends_on:
+      kokoro:
+        condition: service_started

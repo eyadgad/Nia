@@ -1,0 +1,14 @@
+port: 7880
+bind_addresses:
+  - 0.0.0.0
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50020
+  use_external_ip: false
+  # WSL2 users may add a local, untracked node_ip override for their current VM.
+# API keys are injected through LIVEKIT_KEYS by Docker Compose.
+logging:
+  level: info
+room:
+  auto_create: true

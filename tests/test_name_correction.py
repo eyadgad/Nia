@@ -1,0 +1,232 @@
+"""A misspelt name is answered or asked about, never reported as nothing found.
+
+Someone reading a handwritten register types what they see, and what they see is often a
+letter or two off. "No matching records" is then wrong twice over: the person is in the
+list, and the researcher cannot tell a typo from a genuine absence.
+
+How close the guess was decides the response, which is the distinction a person would draw:
+one edit and one candidate is a typo worth correcting in place; anything less certain is a
+question only the researcher can settle.
+"""
+
+import asyncio
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+
+import pytest  # noqa: E402
+
+from app.config import get_settings  # noqa: E402
+from app.data_gateway.memory import MemoryDataGateway  # noqa: E402
+from app.execution.name_correction import (  # noqa: E402
+    NameCorrection,
+    NameSuggestion,
+    ask_text,
+    corrected_prefix,
+    from_rows,
+    is_name_field,
+    rewrite_for,
+    searched_name,
+)
+from app.planning.catalog import static_catalog  # noqa: E402
+from app.planning.plan_schema import (  # noqa: E402
+    FilterOperator,
+    PlanOp,
+    PlanScope,
+    PlanStep,
+    Predicate,
+    QueryPlan,
+)
+from app.security.access_scope import AccessScope  # noqa: E402
+
+
+def _scope() -> AccessScope:
+    return AccessScope(principal_id="researcher", allowed_file_ids=(49, 91))
+
+
+def _plan(*where: Predicate) -> QueryPlan:
+    return QueryPlan(
+        scope=PlanScope(file_ids=(49,)),
+        goals=("lookup",),
+        steps=[
+            PlanStep(id="rows", op=PlanOp.USE_CURRENT_VERSION),
+            PlanStep(id="filter", op=PlanOp.FILTER, input="rows", where=list(where)),
+        ],
+    )
+
+
+def _leaf(field: str, value: str) -> Predicate:
+    return Predicate(field=field, operator=FilterOperator.CONTAINS, value=value)
+
+
+# ---------------------------------------------------------------- reading the plan
+
+
+def test_a_name_field_is_recognised_by_what_it_holds_not_by_its_name():
+    catalog = static_catalog()
+    assert is_name_field("student_name", (49,), catalog)
+    assert not is_name_field("community", (49,), catalog)
+
+
+def test_a_multi_word_name_is_reassembled_from_its_token_filters():
+    """A token index is matched one filter per word, so the words are joined back."""
+    plan = _plan(_leaf("student_name", "Albert"), _leaf("student_name", "Penence"))
+    assert searched_name(plan, static_catalog()) == "Albert Penence"
+
+
+def test_presence_filters_are_not_a_searched_name():
+    plan = _plan(Predicate(field="student_name", operator=FilterOperator.IS_KNOWN))
+    assert searched_name(plan, static_catalog()) == ""
+
+
+def test_a_question_with_no_name_filter_has_nothing_to_correct():
+    plan = _plan(_leaf("community", "Walpole Island"))
+    assert searched_name(plan, static_catalog()) == ""
+
+
+# ---------------------------------------------------------------- deciding what to do
+
+
+def _suggest(*pairs: tuple[str, int]) -> NameCorrection:
+    return NameCorrection(
+        searched_for="Albert Penence",
+        suggestions=tuple(
+            NameSuggestion(display_name=name, file_id=49, source_row_id=i, distance=d)
+            for i, (name, d) in enumerate(pairs)
+        ),
+    )
+
+
+def test_one_person_one_edit_away_is_a_typo():
+    assert _suggest(("Albert Penance", 1)).certain.display_name == "Albert Penance"
+
+
+def test_two_edits_away_is_asked_about_not_assumed():
+    """Two or three letters out is a guess, and guessing silently would be worse."""
+    assert _suggest(("Albert Penance", 2)).certain is None
+
+
+def test_several_people_equally_close_are_asked_about():
+    """"Fisherr" is one edit from six different Fishers; only the researcher knows which."""
+    assert _suggest(("Bertha F Fisher", 1), ("Charles Fisher", 1)).certain is None
+
+
+def test_an_exact_match_is_not_a_suggestion():
+    """A zero-distance row cannot be why the search found nothing."""
+    assert from_rows("Albert Penance", [{"display_name": "Albert Penance", "distance": 0}]) is None
+
+
+def test_nothing_close_enough_leaves_the_original_answer_alone():
+    assert from_rows("Zzzz", []) is None
+
+
+# ---------------------------------------------------------------- what the user reads
+
+
+def test_a_single_candidate_is_offered_by_name():
+    text = ask_text(_suggest(("Albert Penance", 2)))
+    assert "Albert Penance" in text and "Did you mean" in text
+
+
+def test_several_candidates_are_all_listed():
+    text = ask_text(_suggest(("Bertha F Fisher", 1), ("Charles Fisher", 1)))
+    assert "Bertha F Fisher" in text and "Charles Fisher" in text
+
+
+def test_a_correction_is_stated_never_silent():
+    text = corrected_prefix("Albert Penence", "Albert Penance")
+    assert "Albert Penence" in text and "Albert Penance" in text
+
+
+# ---------------------------------------------------------------- re-asking the question
+
+
+def test_the_corrected_plan_asks_the_same_question_of_the_right_person():
+    plan = _plan(_leaf("student_name", "Albert"), _leaf("student_name", "Penence"))
+    rewritten = rewrite_for(plan, static_catalog(), "Albert Penance")
+    values = [
+        leaf.value
+        for step in rewritten.steps
+        for predicate in step.where
+        for leaf in predicate.leaves()
+    ]
+    assert values == ["Albert", "Penance"]
+    assert [step.op for step in rewritten.steps] == [step.op for step in plan.steps]
+
+
+def test_conditions_other_than_the_name_survive_the_rewrite():
+    """Correcting who was asked about must not drop what was asked."""
+    plan = _plan(_leaf("student_name", "Penence"), _leaf("community", "Walpole Island"))
+    rewritten = rewrite_for(plan, static_catalog(), "Albert Penance")
+    kept = [
+        (leaf.field, leaf.value)
+        for step in rewritten.steps
+        for predicate in step.where
+        for leaf in predicate.leaves()
+    ]
+    assert ("community", "Walpole Island") in kept
+
+
+# ---------------------------------------------------------------- against the gateway
+
+
+@pytest.mark.parametrize(
+    "typed,expected",
+    [("Samuell A", "Samuel A"), ("Samuel A", None)],
+)
+def test_the_gateway_finds_near_misses_and_ignores_exact_ones(typed, expected):
+    gateway = MemoryDataGateway()
+    rows = asyncio.run(gateway.suggest_name_matches(_scope(), (49, 91), typed))
+    correction = from_rows(typed, rows)
+    if expected is None:
+        assert correction is None
+    else:
+        assert correction is not None
+        assert correction.certain is not None
+        assert correction.certain.display_name == expected
+
+
+def test_the_feature_can_be_turned_off(monkeypatch):
+    monkeypatch.setenv("NAME_CORRECTION", "false")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().name_correction is False
+    finally:
+        get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------- pointing at an offer
+
+
+def test_an_offered_list_can_be_indexed_by_a_follow_up():
+    """"Did you mean one of these?" is answered by pointing: "the second one".
+
+    That needs the offer registered as a result set. It normally falls out of running a
+    QueryPlan, and this turn has none, so the correction path registers it directly --
+    without this the follow-up came back "no listed result set to index".
+    """
+    from app.memory.followups import resolve_listed_ordinal
+    from app.memory.types import ConversationRecord
+    from app.memory.updates import record_candidate_list
+
+    conversation = ConversationRecord(id="c1", principal_id="researcher")
+    record_candidate_list(
+        conversation,
+        file_ids=(49,),
+        records=[(49, 1101), (49, 1102), (49, 1103)],
+        key="name_correction",
+    )
+    # index is zero-based at this level; the turn service maps "the second one" onto it.
+    resolved = resolve_listed_ordinal(conversation, index=1)
+    assert resolved.kind == "ordinal"
+    assert resolved.source_ids == ["file:49:v1:row:1102"]
+
+
+def test_an_empty_offer_registers_nothing():
+    from app.memory.types import ConversationRecord
+    from app.memory.updates import record_candidate_list
+
+    conversation = ConversationRecord(id="c2", principal_id="researcher")
+    record_candidate_list(conversation, file_ids=(49,), records=[], key="name_correction")
+    assert conversation.active_frame() is None

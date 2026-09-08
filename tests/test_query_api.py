@@ -425,3 +425,62 @@ def test_renaming_something_that_does_not_exist_is_a_404():
         client.patch("/api/assistant/conversations/not-a-uuid", json={"title": "x"}).status_code
         == 404
     )
+
+
+def test_reporting_a_chat_renames_it_so_it_can_be_found_again():
+    """A sidebar of testers' questions all look alike; the reported one should not."""
+    store = InMemoryMemoryStore()
+    client = _client(store)
+    conversation_id = _make_conversation(client)
+
+    sent = client.post(
+        "/api/assistant/feedback",
+        json={
+            "comment": "The count looked wrong.",
+            "reporter_name": "Sam Tester",
+            "conversation_id": conversation_id,
+            "tz_offset_minutes": 0,
+        },
+    )
+    assert sent.status_code == 204
+
+    listed = client.get("/api/assistant/conversations").json()["conversations"]
+    title = {item["id"]: item["title"] for item in listed}[conversation_id]
+    assert title.startswith("Reported - Sam Tester - ")
+    # The turns are still there to read; only the name changed.
+    assert client.get(f"/api/assistant/conversations/{conversation_id}").json()["turns"]
+
+
+def test_an_unnamed_report_still_marks_the_chat():
+    """A missing name is no reason to lose track of the conversation."""
+    store = InMemoryMemoryStore()
+    client = _client(store)
+    conversation_id = _make_conversation(client)
+
+    client.post(
+        "/api/assistant/feedback",
+        json={"comment": "Voice cut out.", "conversation_id": conversation_id},
+    )
+    listed = client.get("/api/assistant/conversations").json()["conversations"]
+    title = {item["id"]: item["title"] for item in listed}[conversation_id]
+    assert title.startswith("Reported - ")
+    assert "None" not in title
+
+
+def test_a_report_with_no_chat_attached_renames_nothing():
+    client = _client()
+    assert client.post("/api/assistant/feedback", json={"comment": "general note"}).status_code == 204
+    assert client.get("/api/assistant/conversations").json()["conversations"] == []
+
+
+def test_the_reported_title_reads_in_the_reporters_own_time():
+    """Stamped from the offset the browser sent, not from wherever the server sits."""
+    from datetime import UTC, datetime
+
+    from app.api.assistant import reported_title
+
+    filed = datetime(2026, 9, 8, 14, 16, tzinfo=UTC)
+    assert reported_title("Eyad", filed) == "Reported - Eyad - 08/09 14:16"
+    assert reported_title("  Eyad  ", filed) == "Reported - Eyad - 08/09 14:16"
+    assert reported_title("", filed) == "Reported - 08/09 14:16"
+    assert reported_title("   ", filed) == "Reported - 08/09 14:16"

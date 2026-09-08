@@ -308,6 +308,9 @@ export async function submitFeedback(input: {
       comment: input.comment,
       reporter_name: input.reporterName ?? "",
       conversation_id: input.conversationId ?? null,
+      // The server stamps the renamed conversation with this, so the time in the sidebar
+      // is the one the reporter's own clock showed. getTimezoneOffset counts the other way.
+      tz_offset_minutes: -new Date().getTimezoneOffset(),
     }),
   });
   if (!response.ok) {

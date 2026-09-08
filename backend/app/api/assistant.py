@@ -3,6 +3,7 @@ import json
 import re
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -233,6 +234,22 @@ class FeedbackRequest(BaseModel):
     reporter_name: str = Field(default="", max_length=MAX_NAME)
     conversation_id: str | None = None
     app_version: str = Field(default="", max_length=64)
+    # Minutes to add to UTC to get the reporter's clock. The title carries a time someone
+    # will read next to their own memory of filing it, so it should say what their clock
+    # said. Bounded to the range real offsets occupy; absent means UTC.
+    tz_offset_minutes: int | None = Field(default=None, ge=-840, le=840)
+
+
+def reported_title(reporter_name: str, filed_at: datetime) -> str:
+    """What a reported conversation is called afterwards.
+
+    Named so the sidebar sorts the complaints to hand and says who to ask about each one.
+    An unnamed report still gets the marker and the time: the point is to find the
+    conversation again, and a missing name is no reason to lose it.
+    """
+    stamp = filed_at.strftime("%d/%m %H:%M")
+    name = " ".join(reporter_name.split())
+    return f"Reported - {name} - {stamp}" if name else f"Reported - {stamp}"
 
 
 @router.post("/feedback", status_code=status.HTTP_204_NO_CONTENT)
@@ -240,25 +257,40 @@ async def submit_feedback(
     body: FeedbackRequest,
     scope: AccessScope = Depends(get_access_scope),
     sink=Depends(_feedback_store),
+    store=Depends(_memory_store),
 ) -> Response:
     """A tester's report: what they saw, and who saw it.
 
     Signed in, because an anonymous write endpoint on a records system is a place to dump
     text. The name is whatever the tester typed and is never treated as identity -- the
     principal is recorded separately, from the session.
+
+    The conversation is renamed to mark it, so whoever reads the report can find the chat it
+    is about in a sidebar of questions that all look alike. Renaming is best-effort: the
+    report is the thing worth keeping, and losing it because a title could not be written
+    would be the wrong way round.
     """
     comment = body.comment.strip()
     if not comment:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="comment is required")
+    reporter_name = body.reporter_name.strip()
     await sink.record(
         scope,
         FeedbackReport(
             comment=comment,
-            reporter_name=body.reporter_name.strip(),
+            reporter_name=reporter_name,
             conversation_id=body.conversation_id,
             app_version=body.app_version.strip(),
         ),
     )
+    if body.conversation_id:
+        filed_at = datetime.now(UTC) + timedelta(minutes=body.tz_offset_minutes or 0)
+        with suppress(Exception):
+            # rename answers False for a conversation that is not this principal's, which is
+            # the same silence a wrong id gets. Nothing here tells the caller either way.
+            await store.rename(
+                scope, body.conversation_id, reported_title(reporter_name, filed_at)
+            )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

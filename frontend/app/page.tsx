@@ -663,6 +663,9 @@ export default function HomePage() {
       });
       setReportSent(true);
       setReportComment("");
+      // The server renames the conversation to mark it as reported, so the sidebar is a
+      // turn out of date until it is asked again.
+      void refreshConversations().catch(() => {});
     } catch (err) {
       setReportError(err instanceof Error ? err.message : "Could not send that report.");
     } finally {

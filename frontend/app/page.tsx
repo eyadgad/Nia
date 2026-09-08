@@ -96,14 +96,21 @@ export default function HomePage() {
   useEffect(() => {
     // Resolved in the browser, not at build time: the answer depends on where the page was
     // served from, and the server rendering it cannot know.
-    if (apiTargetIsUnreachable()) {
-      setApiUnreachable(true);
+    const unreachable = apiTargetIsUnreachable();
+    setApiUnreachable(unreachable);
+    if (unreachable) {
+      // No health call: it would be the local-network request this exists to prevent.
       setApiReady(false);
-      return;
+    } else {
+      health()
+        .then(() => setApiReady(true))
+        .catch(() => setApiReady(false));
     }
-    health()
-      .then(() => setApiReady(true))
-      .catch(() => setApiReady(false));
+    // Always, whatever the outcome above. restoreSession owns `hydrated` in its finally, and
+    // returning early from this effect left it false forever -- the deployed build sat on
+    // "Opening the research desk…" instead of reaching the sign-in screen. When the API is
+    // unreachable fetchSession throws before touching the network, which this already
+    // handles as "no session".
     void restoreSession();
   }, []);
 

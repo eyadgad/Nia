@@ -10,4 +10,18 @@ const nextConfig: NextConfig = {
   agentRules: false,
 };
 
+// Proxy the API through this origin when a backend is configured, so the session cookie is
+// first-party. Served cross-origin it is a third-party cookie: the browser takes the login
+// response, declines to store the cookie, and the next request is anonymous -- login appears
+// to succeed and the app immediately reports the session expired. SameSite=None does not
+// help; modern tracking prevention blocks it anyway.
+const backendOrigin = process.env.BACKEND_ORIGIN?.replace(/\/$/, "");
+
+if (backendOrigin) {
+  nextConfig.rewrites = async () => [
+    { source: "/api/:path*", destination: `${backendOrigin}/api/:path*` },
+    { source: "/health", destination: `${backendOrigin}/health` },
+  ];
+}
+
 export default nextConfig;

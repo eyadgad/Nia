@@ -1,5 +1,11 @@
+// "/" means same origin, which is how the deployed build reaches its backend: Next rewrites
+// /api/* to it, so the browser only ever talks to this site and the session cookie is
+// first-party. Unset still means a local stack, so nothing changes for development.
+const CONFIGURED_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL;
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "http://localhost:8000";
+  CONFIGURED_API_BASE === undefined || CONFIGURED_API_BASE === ""
+    ? "http://localhost:8000"
+    : CONFIGURED_API_BASE.replace(/\/$/, "");
 
 const LOCAL_HOST = /^(localhost|127(?:\.\d+){3}|\[?::1\]?|0\.0\.0\.0)$/i;
 

@@ -1,3 +1,4 @@
+import json
 from functools import lru_cache
 from typing import Literal
 
@@ -44,6 +45,12 @@ class Settings(BaseSettings):
     standalone_demo_username: str = ""
     standalone_demo_password: str = ""
     standalone_demo_principal_id: str = ""
+    # Additional sign-ins, as a JSON array of {username, password, principal_id?}. The pair
+    # above stays the primary account and needs no change; this is for the case the testing
+    # build created, where testers share one published login while development keeps its own.
+    # JSON rather than a delimited string because a password may contain any character, and a
+    # separator that silently truncates one is a login that fails for no visible reason.
+    standalone_extra_accounts: str = ""
     standalone_demo_allowed_file_ids: str = "49,91"
     standalone_demo_can_use_private_files: bool = False
     standalone_demo_history_allowed: bool = False
@@ -177,6 +184,40 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    @property
+    def extra_accounts(self) -> list[dict[str, str]]:
+        """Parsed STANDALONE_EXTRA_ACCOUNTS, or nothing if it is unset or malformed.
+
+        A broken value must not take the primary account down with it, so a parse failure
+        yields no extra accounts rather than raising: the configured sign-in still works and
+        the operator sees the extras missing rather than a service that will not start.
+        """
+        raw = self.standalone_extra_accounts.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(parsed, list):
+            return []
+        accounts: list[dict[str, str]] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            username = str(item.get("username") or "")
+            password = str(item.get("password") or "")
+            if not username or not password:
+                continue
+            accounts.append(
+                {
+                    "username": username,
+                    "password": password,
+                    "principal_id": str(item.get("principal_id") or ""),
+                }
+            )
+        return accounts
 
     @property
     def demo_allowed_file_ids(self) -> list[int]:

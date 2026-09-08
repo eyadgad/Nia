@@ -134,3 +134,70 @@ def test_first_browser_visit_has_an_anonymous_session_response_without_401():
     response = TestClient(create_app()).get("/api/auth/session")
 
     assert response.status_code == 204
+
+
+def _two_account_settings(extra: str) -> Settings:
+    return Settings(
+        jwt_secret="unit-test-secret",
+        standalone_demo_username="dev",
+        standalone_demo_password="dev-password",
+        standalone_demo_principal_id="test-principal",
+        standalone_demo_allowed_file_ids="49,91",
+        standalone_extra_accounts=extra,
+    )
+
+
+def test_a_second_sign_in_works_without_disturbing_the_first():
+    """The testing build publishes one login and development keeps its own.
+
+    One shared password for both would mean rotating the published one locks out the person
+    who has to rotate it.
+    """
+    adapter = StandaloneJwtAuthAdapter(
+        _two_account_settings('[{"username": "tester", "password": "tester-password"}]')
+    )
+    for username, password in (("dev", "dev-password"), ("tester", "tester-password")):
+        scope = asyncio.run(adapter.authenticate_password(username, password))
+        assert scope.display_name == username
+        # No principal of its own, so it shares the configured one: a tester's conversation
+        # stays visible to whoever looks into the report about it.
+        assert scope.principal_id == "test-principal"
+
+
+def test_the_two_passwords_are_not_interchangeable():
+    adapter = StandaloneJwtAuthAdapter(
+        _two_account_settings('[{"username": "tester", "password": "tester-password"}]')
+    )
+    for username, password in (
+        ("dev", "tester-password"),
+        ("tester", "dev-password"),
+        ("nobody", "tester-password"),
+        ("tester", ""),
+    ):
+        with pytest.raises(AuthError):
+            asyncio.run(adapter.authenticate_password(username, password))
+
+
+def test_an_extra_account_can_have_its_own_principal():
+    """Giving testers their own principal keeps their chats out of the dev's sidebar."""
+    adapter = StandaloneJwtAuthAdapter(
+        _two_account_settings(
+            '[{"username": "tester", "password": "tester-password",'
+            ' "principal_id": "principal-tester"}]'
+        )
+    )
+    scope = asyncio.run(adapter.authenticate_password("tester", "tester-password"))
+    assert scope.principal_id == "principal-tester"
+    other = asyncio.run(adapter.authenticate_password("dev", "dev-password"))
+    assert other.principal_id == "test-principal"
+
+
+@pytest.mark.parametrize(
+    "broken",
+    ["not json", "{}", "[]", '["just a string"]', '[{"username": "x"}]', '[{"password": "y"}]'],
+)
+def test_a_broken_extra_accounts_value_never_takes_the_configured_login_down(broken):
+    """A typo in the extras must not be an outage for the account that already worked."""
+    adapter = StandaloneJwtAuthAdapter(_two_account_settings(broken))
+    scope = asyncio.run(adapter.authenticate_password("dev", "dev-password"))
+    assert scope.principal_id == "test-principal"

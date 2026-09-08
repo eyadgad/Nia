@@ -1,3 +1,4 @@
+import hmac
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -17,20 +18,42 @@ class StandaloneJwtAuthAdapter(AuthAdapter):
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
+    def _accounts(self) -> list[tuple[str, str, str]]:
+        """Every sign-in this process accepts, as (username, password, principal_id).
+
+        The configured pair comes first and is unchanged. Extras exist because the testing
+        build publishes one login on its sign-in screen while development keeps its own, and
+        one shared password for both would mean rotating the published one locks out the
+        person who has to rotate it.
+        """
+        primary = (
+            self._settings.standalone_demo_username,
+            self._settings.standalone_demo_password,
+            self._settings.standalone_demo_principal_id,
+        )
+        accounts = [primary] if all(primary) else []
+        for extra in self._settings.extra_accounts:
+            # An extra without its own principal shares the configured one, so a tester's
+            # conversation stays visible to whoever has to look into the report about it.
+            principal = extra["principal_id"] or self._settings.standalone_demo_principal_id
+            if not principal:
+                continue
+            accounts.append((extra["username"], extra["password"], principal))
+        return accounts
+
     async def authenticate_password(self, username: str, password: str) -> AccessScope:
-        configured_username = self._settings.standalone_demo_username
-        configured_password = self._settings.standalone_demo_password
-        configured_principal = self._settings.standalone_demo_principal_id
-        if (
-            not configured_username
-            or not configured_password
-            or not configured_principal
-            or username != configured_username
-            or password != configured_password
-        ):
+        matched: tuple[str, str, str] | None = None
+        for candidate in self._accounts():
+            # compare_digest on both halves, and no early exit once something matches: the
+            # time this takes should not describe which usernames exist.
+            name_ok = hmac.compare_digest(username, candidate[0])
+            password_ok = hmac.compare_digest(password, candidate[1])
+            if name_ok and password_ok:
+                matched = candidate
+        if matched is None:
             raise AuthError("invalid credentials")
         return AccessScope(
-            principal_id=configured_principal,
+            principal_id=matched[2],
             allowed_file_ids=tuple(self._settings.demo_allowed_file_ids),
             can_use_private_files=self._settings.standalone_demo_can_use_private_files,
             history_allowed=self._settings.standalone_demo_history_allowed,

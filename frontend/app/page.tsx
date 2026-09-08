@@ -10,6 +10,7 @@ import {
   Session,
   fetchConversation,
   deleteConversation,
+  submitFeedback,
   fetchConversations,
   fetchDatasets,
   type ModelChoice,
@@ -45,6 +46,12 @@ type ChatLine = {
   errorCode?: string | null;
   suggestedFileId?: number | null;
 };
+
+// Shown on the sign-in screen while this is a testing build. They live in the environment,
+// not in the repository: published login defaults were scrubbed from this project's history
+// once already. Unset means the block simply does not render.
+const TEST_USERNAME = process.env.NEXT_PUBLIC_TEST_USERNAME || "";
+const TEST_PASSWORD = process.env.NEXT_PUBLIC_TEST_PASSWORD || "";
 
 const CONV_KEY = "nia.standalone.conversation";
 const VOICE_PREF_KEY = "nia.standalone.voice-preference";
@@ -598,6 +605,39 @@ export default function HomePage() {
   }
 
   const [copied, setCopied] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportName, setReportName] = useState("");
+  const [reportComment, setReportComment] = useState("");
+  const [reportSending, setReportSending] = useState(false);
+  const [reportSent, setReportSent] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+
+  async function sendReport(event: FormEvent) {
+    event.preventDefault();
+    const comment = reportComment.trim();
+    if (!comment || reportSending) return;
+    setReportSending(true);
+    setReportError(null);
+    try {
+      await submitFeedback({
+        comment,
+        reporterName: reportName.trim(),
+        conversationId,
+      });
+      setReportSent(true);
+      setReportComment("");
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : "Could not send that report.");
+    } finally {
+      setReportSending(false);
+    }
+  }
+
+  function closeReport() {
+    setReportOpen(false);
+    setReportError(null);
+    setReportSent(false);
+  }
   const visibleLines = lines.filter((line) => line.role !== "system");
   const isEmptyConversation = visibleLines.length === 0;
   const activeConversationTitle =
@@ -731,10 +771,33 @@ export default function HomePage() {
             <NiaMark />
             <div className="nia-login-hero-copy">
               <p className="nia-eyebrow">NIA</p>
-              <h1>A desk for the records.</h1>
-              <p>Answers come only from the lists your account is authorized to read.</p>
+              <h1>Still in testing.</h1>
+              <div className="nia-login-brief">
+                <p>This is still under development and testing. Help me test it.</p>
+                {TEST_USERNAME && TEST_PASSWORD ? (
+                  <>
+                    <p>You can access the workspace with these credentials:</p>
+                    <dl className="nia-login-creds">
+                      <div>
+                        <dt>Username</dt>
+                        <dd>{TEST_USERNAME}</dd>
+                      </div>
+                      <div>
+                        <dt>Password</dt>
+                        <dd>{TEST_PASSWORD}</dd>
+                      </div>
+                    </dl>
+                  </>
+                ) : null}
+                <p>The goal is to find bugs, and inappropriate or inaccurate answers.</p>
+                <p>
+                  If you find any, at the end of your conversation click{" "}
+                  <strong>Report</strong> at the top, write your name and any comments, and
+                  submit.
+                </p>
+              </div>
             </div>
-            <div className="nia-login-hero-foot">Authorized research workspace</div>
+            <div className="nia-login-hero-foot">Testing build</div>
           </div>
           <div className="nia-login-card">
             <div className="nia-login-brand">
@@ -745,9 +808,7 @@ export default function HomePage() {
               </div>
             </div>
             <div className="nia-login-copy">
-              <p className="nia-eyebrow">Sign in</p>
-              <h1>Continue</h1>
-              <p>Use the credentials issued for this workspace.</p>
+              <h1>Sign in</h1>
             </div>
             <form onSubmit={onLogin} className="nia-login-form">
               <label>
@@ -957,6 +1018,16 @@ export default function HomePage() {
               )}
               <button
                 type="button"
+                onClick={() => setReportOpen(true)}
+                className="nia-report-button"
+                aria-label="Report a problem"
+                title="Report a bug, or an inappropriate or inaccurate answer"
+              >
+                <FlagIcon />
+                <span className="nia-report-label">Report</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => void copyConversation()}
                 className="nia-icon-button"
                 disabled={isEmptyConversation}
@@ -1077,6 +1148,71 @@ export default function HomePage() {
             </div>
           </div>
         </section>
+
+        {reportOpen ? (
+          <div className="nia-modal-layer">
+            <button
+              type="button"
+              className="nia-modal-backdrop"
+              aria-label="Close report"
+              onClick={closeReport}
+            />
+            <aside className="nia-report-panel" role="dialog" aria-modal="true" aria-label="Report a problem">
+              <div className="nia-source-head">
+                <div>
+                  <span>Testing</span>
+                  <strong>Report a problem</strong>
+                </div>
+                <button type="button" className="nia-icon-button" onClick={closeReport} aria-label="Close report">
+                  <CloseIcon />
+                </button>
+              </div>
+              {reportSent ? (
+                <div className="nia-report-done">
+                  <p>Thank you — your report was sent.</p>
+                  <button type="button" className="nia-primary-button" onClick={closeReport}>
+                    Close
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={sendReport} className="nia-report-form">
+                  <p className="nia-report-intro">
+                    Found a bug, or an answer that was inaccurate or inappropriate? Tell us
+                    what happened. Your current chat is attached automatically.
+                  </p>
+                  <label>
+                    <span>Your name</span>
+                    <input
+                      className="nia-field"
+                      value={reportName}
+                      maxLength={120}
+                      onChange={(event) => setReportName(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Comments</span>
+                    <textarea
+                      className="nia-field nia-report-textarea"
+                      value={reportComment}
+                      maxLength={4000}
+                      rows={6}
+                      required
+                      onChange={(event) => setReportComment(event.target.value)}
+                    />
+                  </label>
+                  {reportError ? <p className="nia-form-error">{reportError}</p> : null}
+                  <button
+                    type="submit"
+                    className="nia-primary-button"
+                    disabled={reportSending || !reportComment.trim()}
+                  >
+                    {reportSending ? "Sending…" : "Submit report"}
+                  </button>
+                </form>
+              )}
+            </aside>
+          </div>
+        ) : null}
 
         {selectedCitation ? (
           <div className="nia-modal-layer">
@@ -1368,6 +1504,7 @@ function VoiceIcon() { return <Icon path="M12 15a3 3 0 003-3V7a3 3 0 10-6 0v5a3 
 function ArrowUpIcon() { return <Icon path="M12 19V5M6.5 10.5L12 5l5.5 5.5" className="h-4 w-4" />; }
 function ArrowDiagonalIcon() { return <Icon path="M8 16L16 8M10 8h6v6" className="h-4 w-4" />; }
 function CopyIcon() { return <Icon path="M9 9h9v9H9zM6 15H5V5h10v1" />; }
+function FlagIcon() { return <Icon path="M6 20V5h11l-2 3.5L17 12H6" className="h-4 w-4" />; }
 function TrashIcon() { return <Icon path="M5 7h14M10 7V5h4v2M6 7l1 12h10l1-12M10 11v5M14 11v5" className="h-4 w-4" />; }
 function CheckIcon() { return <Icon path="M5 13l4 4L19 7" />; }
 function SourceIcon() { return <Icon path="M7 7h10v10H7zM10 10h8v8h-8z" className="h-3.5 w-3.5" />; }

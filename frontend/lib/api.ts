@@ -230,6 +230,25 @@ export async function deleteConversation(conversationId: string): Promise<void> 
   }
 }
 
+export async function submitFeedback(input: {
+  comment: string;
+  reporterName?: string;
+  conversationId?: string | null;
+}): Promise<void> {
+  const response = await authorizedFetch("/api/assistant/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      comment: input.comment,
+      reporter_name: input.reporterName ?? "",
+      conversation_id: input.conversationId ?? null,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error("Could not send that report.");
+  }
+}
+
 export type ConversationTurn = {
   role: string;
   text: string;

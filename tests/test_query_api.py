@@ -4,11 +4,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from app.api.assistant import QueryRequest, _memory_store, _stream_query, _turn_service
+from app.api.assistant import (
+    QueryRequest,
+    _feedback_store,
+    _memory_store,
+    _stream_query,
+    _turn_service,
+)
 from app.data_gateway.memory import MemoryDataGateway
 from app.execution.turn import AssistantTurnService, TurnResult
 from app.llm.fake import FakeReasoningProvider
 from app.main import create_app
+from app.memory.feedback import InMemoryFeedbackStore
 from app.memory.store import InMemoryMemoryStore
 from app.security.access_scope import AccessScope
 from app.security.deps import get_access_scope
@@ -22,6 +29,7 @@ from fastapi.testclient import TestClient
 def _client(store: InMemoryMemoryStore | None = None) -> TestClient:
     app = create_app()
     memory = store or InMemoryMemoryStore()
+    reports = InMemoryFeedbackStore()
 
     def scope() -> AccessScope:
         return AccessScope(principal_id="principal-researcher", allowed_file_ids=(49, 91))
@@ -32,7 +40,10 @@ def _client(store: InMemoryMemoryStore | None = None) -> TestClient:
     app.dependency_overrides[get_access_scope] = scope
     app.dependency_overrides[_memory_store] = lambda: memory
     app.dependency_overrides[_turn_service] = service
-    return TestClient(app)
+    app.dependency_overrides[_feedback_store] = lambda: reports
+    client = TestClient(app)
+    client.reports = reports  # type: ignore[attr-defined]
+    return client
 
 
 def test_query_golden_path_json():
@@ -286,3 +297,54 @@ def test_one_researcher_cannot_delete_another_researchers_conversation():
     # And it is still there for the principal it belongs to.
     other_scope = AccessScope(principal_id="principal-someone-else", allowed_file_ids=(49,))
     assert asyncio.run(store.get(other_scope, someone_else.id)) is not None
+
+
+def test_a_tester_can_report_a_problem():
+    """The sign-in screen tells testers to click Report and submit; this is where it lands."""
+    client = _client()
+    asked = client.post(
+        "/api/assistant/query",
+        json={"question": "How many students have names starting with S?", "mode": "text"},
+    )
+    conversation_id = asked.json()["conversation_id"]
+
+    sent = client.post(
+        "/api/assistant/feedback",
+        json={
+            "comment": "The count looked wrong for names starting with S.",
+            "reporter_name": "Sam Tester",
+            "conversation_id": conversation_id,
+        },
+    )
+    assert sent.status_code == 204
+    [report] = client.reports.reports
+    assert report.reporter_name == "Sam Tester"
+    assert "count looked wrong" in report.comment
+    assert report.conversation_id == conversation_id
+
+
+def test_a_report_without_a_name_is_still_kept():
+    """A finding is worth more than the field identifying who filed it."""
+    client = _client()
+    sent = client.post("/api/assistant/feedback", json={"comment": "Voice cut out halfway."})
+    assert sent.status_code == 204
+    [report] = client.reports.reports
+    assert report.reporter_name == ""
+    assert report.conversation_id is None
+
+
+def test_an_empty_report_is_refused():
+    client = _client()
+    assert client.post("/api/assistant/feedback", json={"comment": "   "}).status_code == 422
+    assert client.post("/api/assistant/feedback", json={"comment": ""}).status_code == 422
+    assert client.reports.reports == []
+
+
+def test_a_report_cannot_be_used_to_dump_unbounded_text():
+    client = _client()
+    huge = client.post("/api/assistant/feedback", json={"comment": "x" * 4001})
+    assert huge.status_code == 422
+    long_name = client.post(
+        "/api/assistant/feedback", json={"comment": "fine", "reporter_name": "n" * 121}
+    )
+    assert long_name.status_code == 422

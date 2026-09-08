@@ -839,6 +839,37 @@ button:disabled { cursor: default; }
   font-size: 15px;
   line-height: 23px;
 }
+.nia-login-brief { margin-top: 18px; }
+/* The brief is a short read on a dark panel, so it wants a slightly wider measure and
+   tighter rhythm than the single line of hero copy it replaced. */
+.nia-login-brief p { max-width: 40ch; margin: 10px 0 0; font-size: 14px; line-height: 21px; }
+.nia-login-brief strong { color: rgba(244, 239, 228, 0.94); font-weight: 620; }
+.nia-login-creds {
+  display: grid;
+  gap: 6px;
+  max-width: 40ch;
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(244, 239, 228, 0.16);
+  border-radius: 10px;
+  background: rgba(244, 239, 228, 0.06);
+}
+.nia-login-creds > div { display: flex; align-items: baseline; gap: 10px; }
+.nia-login-creds dt {
+  flex: 0 0 74px;
+  color: rgba(244, 239, 228, 0.52);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.nia-login-creds dd {
+  margin: 0;
+  color: rgba(244, 239, 228, 0.94);
+  /* A credential is copied by eye, so the glyphs have to be unambiguous. */
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
 .nia-login-hero-foot {
   color: rgba(244, 239, 228, 0.48);
   font-size: 11px;
@@ -894,6 +925,47 @@ button:disabled { cursor: default; }
 /* citation modal */
 .nia-modal-layer { position: absolute; inset: 0; z-index: 80; display: grid; place-items: center; padding: 18px; }
 .nia-modal-backdrop { position: absolute; inset: 0; border: 0; background: rgba(20,20,18,.28); backdrop-filter: blur(1px); }
+.nia-report-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 520;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.nia-report-button:hover { background: var(--sidebar-hover); color: var(--text); border-color: #d8cfbc; }
+/* The word goes before the icon does: on a narrow header the flag still says "report". */
+@media (max-width: 720px) {
+  .nia-report-label { display: none; }
+  .nia-report-button { padding: 0 8px; }
+}
+.nia-report-panel {
+  position: relative;
+  z-index: 1;
+  width: min(520px, 100%);
+  max-height: min(640px, 82vh);
+  overflow-y: auto;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: #fffcf6;
+  box-shadow: 0 26px 70px rgba(42, 36, 24, 0.24);
+}
+.nia-report-intro { margin: 0 0 4px; color: var(--muted); font-size: 13px; line-height: 20px; }
+.nia-report-form { display: flex; flex-direction: column; gap: 13px; margin-top: 16px; }
+.nia-report-form label { display: flex; flex-direction: column; gap: 6px; }
+.nia-report-form label span { color: var(--muted); font-size: 12px; font-weight: 560; }
+.nia-report-textarea { min-height: 120px; padding: 10px 12px; resize: vertical; line-height: 20px; }
+.nia-report-done { margin-top: 18px; display: flex; flex-direction: column; gap: 14px; }
+.nia-report-done p { margin: 0; color: var(--text); font-size: 14px; line-height: 21px; }
+
 .nia-source-panel {
   position: relative;
   z-index: 1;

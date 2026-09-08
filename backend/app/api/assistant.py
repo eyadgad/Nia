@@ -17,6 +17,12 @@ from app.data_gateway.repository import AssistantDataGateway
 from app.db.pool import get_pool
 from app.execution.turn import AssistantTurnService, TurnResult
 from app.llm.factory import allowed_models, get_reasoning_provider
+from app.memory.feedback import (
+    MAX_COMMENT,
+    MAX_NAME,
+    FeedbackReport,
+    default_feedback_store,
+)
 from app.memory.store import default_memory_store
 from app.observability.audit import default_auditor
 from app.security.access_scope import AccessScope
@@ -52,6 +58,10 @@ def _gateway() -> DataGateway:
 
 def _memory_store():
     return default_memory_store()
+
+
+def _feedback_store():
+    return default_feedback_store()
 
 
 def _turn_service(
@@ -182,6 +192,40 @@ async def delete_conversation(
         principal_id=scope.principal_id,
         authorization_outcome="allowed",
         conversation_id=conversation_id,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class FeedbackRequest(BaseModel):
+    comment: str = Field(min_length=1, max_length=MAX_COMMENT)
+    reporter_name: str = Field(default="", max_length=MAX_NAME)
+    conversation_id: str | None = None
+    app_version: str = Field(default="", max_length=64)
+
+
+@router.post("/feedback", status_code=status.HTTP_204_NO_CONTENT)
+async def submit_feedback(
+    body: FeedbackRequest,
+    scope: AccessScope = Depends(get_access_scope),
+    sink=Depends(_feedback_store),
+) -> Response:
+    """A tester's report: what they saw, and who saw it.
+
+    Signed in, because an anonymous write endpoint on a records system is a place to dump
+    text. The name is whatever the tester typed and is never treated as identity -- the
+    principal is recorded separately, from the session.
+    """
+    comment = body.comment.strip()
+    if not comment:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="comment is required")
+    await sink.record(
+        scope,
+        FeedbackReport(
+            comment=comment,
+            reporter_name=body.reporter_name.strip(),
+            conversation_id=body.conversation_id,
+            app_version=body.app_version.strip(),
+        ),
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

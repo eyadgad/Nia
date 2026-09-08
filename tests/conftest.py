@@ -21,6 +21,20 @@ def _legacy_planner_unless_ai_requested(request: pytest.FixtureRequest, monkeypa
     monkeypatch.setenv("PLANNER_MODE", "ai" if wants_ai else "legacy")
     monkeypatch.setenv("LIVEKIT_API_KEY", "unit-test-key")
     monkeypatch.setenv("LIVEKIT_API_SECRET", "unit-test-livekit-secret")
+    # Settings reads ../.env, so whatever the developer has deployed against leaks in here.
+    # Pointing a backend at a tunnel -- AUTH_COOKIE_SECURE=true for the cross-site cookie --
+    # failed three tests that had nothing to do with the change: TestClient speaks http, so a
+    # Secure cookie is never sent back and authenticated calls 401, and the hardening test's
+    # "unsafe production default" was no longer unsafe. The suite decides its own
+    # environment; a test that wants another value passes it to Settings explicitly.
+    for name, value in (
+        ("AUTH_COOKIE_SECURE", "false"),
+        ("AUTH_COOKIE_SAMESITE", "lax"),
+        ("CORS_ORIGINS", "http://localhost:3000"),
+        ("FRONTEND_ORIGIN", "http://localhost:3000"),
+        ("STANDALONE_EXTRA_ACCOUNTS", ""),
+    ):
+        monkeypatch.setenv(name, value)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

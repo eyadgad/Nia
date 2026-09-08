@@ -154,6 +154,11 @@ services:
   frontend:
     build:
       context: ../frontend
+      args:
+        # Baked into the client bundle at build time. Unset means the sign-in screen shows
+        # no credentials block, which is the right default for anything but a test build.
+        NEXT_PUBLIC_TEST_USERNAME: ${STANDALONE_DEMO_USERNAME:-}
+        NEXT_PUBLIC_TEST_PASSWORD: ${STANDALONE_DEMO_PASSWORD:-}
     environment:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
     ports:

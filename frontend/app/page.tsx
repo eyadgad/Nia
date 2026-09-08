@@ -9,6 +9,7 @@ import {
   QueryListResult,
   Session,
   fetchConversation,
+  deleteConversation,
   fetchConversations,
   fetchDatasets,
   type ModelChoice,
@@ -170,7 +171,18 @@ export default function HomePage() {
 
   async function refreshConversations() {
     try {
-      setConversations(await fetchConversations());
+      const remote = await fetchConversations();
+      setConversations((current) => {
+        const optimistic = new Map(current.map((item) => [item.id, item]));
+        return remote.map((item) => {
+          const prior = optimistic.get(item.id);
+          if (!prior) return item;
+          return {
+            ...item,
+            title: item.title || prior.title,
+          };
+        });
+      });
     } catch (err) {
       if (err instanceof AuthExpiredError) {
         expireSession();
@@ -217,6 +229,25 @@ export default function HomePage() {
     setSidebarOpen(false);
     setLines([welcomeLine()]);
     window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  async function removeConversation(id: string, label: string) {
+    if (busy) return;
+    if (!window.confirm(`Delete "${label}"? This cannot be undone.`)) return;
+    const wasActive = id === conversationId;
+    const previous = conversations;
+    // Drop the row first so the sidebar answers the click, and put it back if the
+    // server disagrees -- a chat that silently reappears on the next refresh is worse
+    // than one that never left.
+    setConversations((current) => current.filter((item) => item.id !== id));
+    try {
+      await deleteConversation(id);
+    } catch (err) {
+      setConversations(previous);
+      setError(err instanceof Error ? err.message : "Could not delete that conversation.");
+      return;
+    }
+    if (wasActive) startNewConversation();
   }
 
   async function openConversation(id: string) {
@@ -518,7 +549,28 @@ export default function HomePage() {
             : line
         )
       );
-      await refreshConversations();
+      const conversationId = result.conversation_id;
+      if (conversationId) {
+        const preview = (result.answer || text).slice(0, 80);
+        setConversations((current) => {
+          const existing = current.find((item) => item.id === conversationId);
+          const optimistic: ConversationSummary = {
+            id: conversationId,
+            title: existing?.title ?? null,
+            active_frame_key: existing?.active_frame_key ?? null,
+            preview,
+            turn_count: (existing?.turn_count ?? 0) + 1,
+            selected_file_id: result.selected_file_id ?? existing?.selected_file_id ?? null,
+            selected_dataset_label: existing?.selected_dataset_label ?? null,
+            legacy_unscoped: existing?.legacy_unscoped ?? false,
+          };
+          const rest = current.filter((item) => item.id !== conversationId);
+          return [optimistic, ...rest];
+        });
+      }
+      void refreshConversations().catch((err) => {
+        console.warn("conversation list refresh failed", err);
+      });
     } catch (err) {
       if (err instanceof AuthExpiredError) {
         expireSession();
@@ -666,7 +718,7 @@ export default function HomePage() {
     return (
       <main className="nia-stage nia-stage-loading">
         <div className="nia-loading-mark"><NiaGlyph /></div>
-        <span>Restoring NIA…</span>
+        <span>Opening the research desk…</span>
       </main>
     );
   }
@@ -675,44 +727,55 @@ export default function HomePage() {
     return (
       <main className="nia-stage nia-login-stage">
         <section className="nia-login-panel">
-          <div className="nia-login-brand">
+          <div className="nia-login-hero">
             <NiaMark />
-            <div>
-              <strong>NIA</strong>
-              <span>Research Assistant</span>
+            <div className="nia-login-hero-copy">
+              <p className="nia-eyebrow">NIA</p>
+              <h1>A desk for the records.</h1>
+              <p>Answers come only from the lists your account is authorized to read.</p>
             </div>
+            <div className="nia-login-hero-foot">Authorized research workspace</div>
           </div>
-          <div className="nia-login-copy">
-            <p className="nia-eyebrow">Standalone workspace</p>
-            <h1>Continue to NIA</h1>
-            <p>Sign in to search and discuss the research records available to your account.</p>
-          </div>
-          <form onSubmit={onLogin} className="nia-login-form">
-            <label>
-              <span>Username</span>
-              <input
-                className="nia-field"
-                value={username}
-                autoComplete="username"
-                onChange={(event) => setUsername(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>Password</span>
-              <input
-                type="password"
-                className="nia-field"
-                value={password}
-                autoComplete="current-password"
-                onChange={(event) => setPassword(event.target.value)}
-              />
-            </label>
-            {error ? <p className="nia-form-error">{error}</p> : null}
-            <button type="submit" className="nia-primary-button">Continue</button>
-          </form>
-          <div className="nia-login-status">
-            <span className={`nia-status-dot ${apiReady ? "is-ready" : "is-offline"}`} />
-            API {apiReady ? "connected" : "offline"}
+          <div className="nia-login-card">
+            <div className="nia-login-brand">
+              <NiaMark />
+              <div>
+                <strong>NIA</strong>
+                <span>Research assistant</span>
+              </div>
+            </div>
+            <div className="nia-login-copy">
+              <p className="nia-eyebrow">Sign in</p>
+              <h1>Continue</h1>
+              <p>Use the credentials issued for this workspace.</p>
+            </div>
+            <form onSubmit={onLogin} className="nia-login-form">
+              <label>
+                <span>Username</span>
+                <input
+                  className="nia-field"
+                  value={username}
+                  autoComplete="username"
+                  onChange={(event) => setUsername(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Password</span>
+                <input
+                  type="password"
+                  className="nia-field"
+                  value={password}
+                  autoComplete="current-password"
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+              </label>
+              {error ? <p className="nia-form-error">{error}</p> : null}
+              <button type="submit" className="nia-primary-button">Enter workspace</button>
+            </form>
+            <div className="nia-login-status">
+              <span className={`nia-status-dot ${apiReady ? "is-ready" : "is-offline"}`} />
+              API {apiReady ? "connected" : "offline"}
+            </div>
           </div>
         </section>
       </main>
@@ -741,7 +804,7 @@ export default function HomePage() {
               onClick={() => sidebarCollapsed && setSidebarCollapsed(false)}
               title={sidebarCollapsed ? "Expand sidebar" : "NIA"}
             >
-              <NiaMark compact />
+              <NiaMark compact={sidebarCollapsed} />
               <span className="nia-sidebar-label">NIA</span>
             </button>
             <button
@@ -780,7 +843,7 @@ export default function HomePage() {
             <ul>
               {conversations.length ? (
                 conversations.map((item) => (
-                  <li key={item.id}>
+                  <li key={item.id} className="nia-history-row">
                     <button
                       type="button"
                       onClick={() => void openConversation(item.id)}
@@ -792,6 +855,18 @@ export default function HomePage() {
                         <strong>{item.title || "Untitled conversation"}</strong>
                         <small>{item.preview}</small>
                       </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="nia-history-delete nia-sidebar-label"
+                      onClick={() =>
+                        void removeConversation(item.id, item.title || "Untitled conversation")
+                      }
+                      disabled={busy}
+                      title="Delete this chat"
+                      aria-label={`Delete ${item.title || "Untitled conversation"}`}
+                    >
+                      <TrashIcon />
                     </button>
                   </li>
                 ))
@@ -863,7 +938,7 @@ export default function HomePage() {
                 ))}
               </div>
               {models.length > 1 && (
-                <div className="nia-dataset-toggle" role="group" aria-label="Model">
+                <div className="nia-dataset-toggle" role="group" aria-label="Answer model">
                   {models.map((option) => (
                     <button
                       key={option.id}
@@ -908,6 +983,14 @@ export default function HomePage() {
             {isEmptyConversation ? (
               <div className="nia-empty-state">
                 <div className="nia-empty-mark"><NiaGlyph /></div>
+                <p className="nia-eyebrow">Research desk</p>
+                <h1>Ask about the records</h1>
+                <p>NIA searches only the list this chat is using. Start with a count, a name, or what the list contains.</p>
+                {activeDataset ? (
+                  <div className="nia-empty-list">
+                    Working in <strong>{activeDataset.user_facing_label}</strong>
+                  </div>
+                ) : null}
                 <div className="nia-suggestions">
                   {(activeDataset?.starter_prompts?.length
                     ? activeDataset.starter_prompts
@@ -959,7 +1042,7 @@ export default function HomePage() {
                   ref={composerRef}
                   rows={1}
                   className="nia-composer-input"
-                  placeholder="Message NIA"
+                  placeholder="Ask about this list"
                   value={question}
                   onChange={onQuestionChange}
                   onKeyDown={onComposerKeyDown}
@@ -1189,10 +1272,13 @@ function modelLabel(id: string): string {
 }
 
 function modelHint(id: string): string {
+  // This picks the model that writes the answer, not the one that plans the query.
+  // Planning is pinned to PLANNER_MODEL server-side so a slower pick cannot make
+  // finding the records slower -- only the wording of the reply changes.
   if (id.includes("non-reasoning")) {
-    return `${id} - answers directly, about 6s per step`;
+    return `${id} - writes the answer directly`;
   }
-  return `${id} - reasons before answering, slower but more deliberate`;
+  return `${id} - reasons before writing the answer, slower and more deliberate`;
 }
 
 function defaultDatasetId(datasets: Dataset[]): number | null {
@@ -1282,6 +1368,7 @@ function VoiceIcon() { return <Icon path="M12 15a3 3 0 003-3V7a3 3 0 10-6 0v5a3 
 function ArrowUpIcon() { return <Icon path="M12 19V5M6.5 10.5L12 5l5.5 5.5" className="h-4 w-4" />; }
 function ArrowDiagonalIcon() { return <Icon path="M8 16L16 8M10 8h6v6" className="h-4 w-4" />; }
 function CopyIcon() { return <Icon path="M9 9h9v9H9zM6 15H5V5h10v1" />; }
+function TrashIcon() { return <Icon path="M5 7h14M10 7V5h4v2M6 7l1 12h10l1-12M10 11v5M14 11v5" className="h-4 w-4" />; }
 function CheckIcon() { return <Icon path="M5 13l4 4L19 7" />; }
 function SourceIcon() { return <Icon path="M7 7h10v10H7zM10 10h8v8h-8z" className="h-3.5 w-3.5" />; }
 function PanelIcon({ collapsed = false }: { collapsed?: boolean }) {

@@ -361,29 +361,107 @@ class PlannedTurn(AIPlannerModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_query_requirements_without_query(cls, value: Any) -> Any:
-        """Respond/clarify-only turns cannot carry query requirements.
+    def _drop_blank_small_talk_beside_real_work(cls, value: Any) -> Any:
+        """Drop an empty general_conversation respond that rides along with real actions.
 
-        This is not condition loss: there is no query action those
-        requirements could target. Schema questions often attach a leftover
-        goal requirement to describe_available_data.
+        The planner sometimes appends a conversational flourish to a perfectly good query and
+        leaves its text blank. An empty general_conversation is genuinely unusable on its own,
+        so the action validator rejects it -- and takes the query down with it, costing a
+        schema-validation retry and sometimes the turn.
+
+        Nothing is lost by dropping it: the wording of an answer that has query results comes
+        from synthesis, not from this field. Guarded on there being another actionable action,
+        because a turn whose only action is blank small talk really does have nothing to say
+        and should still fail.
         """
         if not isinstance(value, dict):
             return value
         actions = value.get("actions") or []
+        if len(actions) < 2:
+            return value
+
+        def _get(action: Any, key: str) -> Any:
+            return action.get(key) if isinstance(action, dict) else getattr(action, key, None)
+
+        if not any(_get(action, "type") in _ACTIONABLE_TYPES for action in actions):
+            return value
+        kept = [
+            action
+            for action in actions
+            if not (
+                _get(action, "type") == "respond"
+                and _get(action, "intent") == "general_conversation"
+                and not str(_get(action, "response") or "").strip()
+            )
+        ]
+        if len(kept) == len(actions):
+            return value
+        # Requirements name their action by position, so the indexes have to move with it.
+        moved = {}
+        offset = 0
+        for index, action in enumerate(actions):
+            if action in kept:
+                moved[index] = index - offset
+            else:
+                offset += 1
+        requirements = []
+        for item in value.get("stated_requirements") or []:
+            is_dict = isinstance(item, dict)
+            index = item.get("action_index") if is_dict else getattr(item, "action_index", None)
+            if index in moved:
+                requirements.append(
+                    {**item, "action_index": moved[index]}
+                    if is_dict
+                    else item.model_copy(update={"action_index": moved[index]})
+                )
+            elif not isinstance(index, int):
+                requirements.append(item)
+        updated = dict(value)
+        updated["actions"] = kept
+        updated["stated_requirements"] = requirements
+        return updated
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_query_requirements_without_query(cls, value: Any) -> Any:
+        """Drop a query requirement that has no query action to describe.
+
+        This is not condition loss: there is nothing for such a requirement to be checked
+        against. Schema questions often attach a leftover goal requirement to
+        describe_available_data.
+
+        Dropped per requirement, by the action it names, rather than per turn. The two rules
+        have to agree on what "no query action" means and they did not: this guard used to
+        stand down whenever the turn held any actionable action, while _requirement_targets
+        below rejects unless the named action is specifically a query. A follow-up planned as
+        modify_previous alone fell in that gap -- the planner stated the filter it was
+        carrying, which is the honest thing to state, and the turn was thrown away for it.
+        Live, that turned "what are their names" into "planning service unavailable".
+        """
+        if not isinstance(value, dict):
+            return value
+        actions = value.get("actions") or []
+        if not actions:
+            return value
         types: list[str | None] = []
         for action in actions:
             if isinstance(action, dict):
                 types.append(action.get("type"))
             else:
                 types.append(getattr(action, "type", None))
-        if not actions or any(item in _ACTIONABLE_TYPES for item in types):
-            return value
         kept = []
         for item in value.get("stated_requirements") or []:
-            kind = item.get("kind") if isinstance(item, dict) else getattr(item, "kind", None)
-            if kind not in _QUERY_REQUIREMENT_KINDS:
-                kept.append(item)
+            if isinstance(item, dict):
+                kind, index = item.get("kind"), item.get("action_index")
+            else:
+                kind, index = getattr(item, "kind", None), getattr(item, "action_index", None)
+            # An out-of-range index is left alone for _requirement_indexes to reject. That is
+            # a planner that has lost track of its own actions, which is worth failing on,
+            # and not a requirement that merely has nowhere to sit.
+            in_range = isinstance(index, int) and 0 <= index < len(types)
+            if kind in _QUERY_REQUIREMENT_KINDS and in_range and types[index] != "query":
+                continue
+            kept.append(item)
         updated = dict(value)
         updated["stated_requirements"] = kept
         return updated

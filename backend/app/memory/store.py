@@ -15,6 +15,8 @@ class MemoryStore(Protocol):
 
     async def get(self, scope: AccessScope, conversation_id: str) -> ConversationRecord | None: ...
 
+    async def delete(self, scope: AccessScope, conversation_id: str) -> bool: ...
+
 
 class InMemoryMemoryStore:
     """Process-local store. Same AccessScope principal_id isolation as Postgres."""
@@ -45,6 +47,16 @@ class InMemoryMemoryStore:
         if record.principal_id != scope.principal_id:
             raise PermissionError("conversation is not in this access scope")
         return record
+
+    async def delete(self, scope: AccessScope, conversation_id: str) -> bool:
+        """Forget one conversation. False when there was nothing of this principal's to forget."""
+        record = self._records.get(conversation_id)
+        if record is None:
+            return False
+        if record.principal_id != scope.principal_id:
+            raise PermissionError("conversation is not in this access scope")
+        del self._records[conversation_id]
+        return True
 
 
 _DEFAULT_STORE = InMemoryMemoryStore()

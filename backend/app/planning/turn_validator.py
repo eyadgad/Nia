@@ -64,10 +64,19 @@ def validate_turn_plan(
     if len(turn.actions) > MAX_TURN_ACTIONS:
         raise PlanValidationError("turn exceeds action budget", code="budget")
 
-    # A low self-reported confidence used to replace the whole turn with a canned
-    # "could you say that another way". That silently discarded perfectly executable
-    # queries for exactly the hard questions the compiler is least sure about. Only
-    # clarify when nothing executable survived.
+    # What a low self-reported confidence costs the turn, which differs by mode:
+    #
+    #   strict (the AI path): the turn is replaced by a canned clarification even when it
+    #     is perfectly executable. This is the gate that makes a "review only when
+    #     confidence is low" rule dead on arrival -- nothing below the threshold survives
+    #     to reach review.
+    #   non-strict (legacy): only a turn with nothing executable is clarified, because
+    #     discarding a runnable query for a hard question answers nobody.
+    #
+    # The two are deliberately different and the earlier comment here described only the
+    # second, which read as though the strict branch were a bug. Whether strict should keep
+    # discarding executable plans is a policy question that wants measurement, not an
+    # edit: it is the confidence gate the latency work is scheduled to shadow.
     executable = bool(
         turn.query_actions()
         or turn.modify_actions()

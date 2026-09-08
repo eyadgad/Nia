@@ -873,9 +873,9 @@ Use the existing WSL2 Compose project without deleting volumes:
 
 ```sh
 cd /mnt/c/Users/gad/Desktop/nia-standalone
-docker compose -f infra/docker-compose.yml build migrate backend
-docker compose -f infra/docker-compose.yml up -d postgres
-docker compose -f infra/docker-compose.yml run --rm migrate
+docker compose --env-file .env -f infra/docker-compose.yml build migrate backend
+docker compose --env-file .env -f infra/docker-compose.yml up -d postgres
+docker compose --env-file .env -f infra/docker-compose.yml run --rm migrate
 ```
 
 Local/static verification:

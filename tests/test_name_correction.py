@@ -112,9 +112,25 @@ def test_several_people_equally_close_are_asked_about():
     assert _suggest(("Bertha F Fisher", 1), ("Charles Fisher", 1)).certain is None
 
 
-def test_an_exact_match_is_not_a_suggestion():
-    """A zero-distance row cannot be why the search found nothing."""
+def test_a_name_the_list_records_is_never_corrected():
+    """An exact match proves the name was not misspelt, so there is nothing to offer."""
     assert from_rows("Albert Penance", [{"display_name": "Albert Penance", "distance": 0}]) is None
+
+
+def test_an_exact_match_silences_the_near_ones():
+    """The real case this guards, taken from a live thread.
+
+    Asked about four students named York, a plan bound "York" to the wrong name field and
+    returned nothing. This then offered "Did you mean Albert Voerk?" -- inventing a spelling
+    problem, hiding the real one, and pointing at someone else entirely. A zero-distance row
+    anywhere in the index means this feature has no business in the turn.
+    """
+    rows = [
+        {"display_name": "Edward York", "distance": 0},
+        {"display_name": "Albert Voerk", "distance": 1},
+        {"display_name": "Cassie Yorke", "distance": 1},
+    ]
+    assert from_rows("York", rows) is None
 
 
 def test_nothing_close_enough_leaves_the_original_answer_alone():

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -106,6 +107,7 @@ class TurnResult:
     planner_model: str | None = None
     planner_usage: dict[str, Any] = field(default_factory=dict)
     original_planned: object | None = None
+    latency: dict[str, Any] = field(default_factory=dict)
 
 
 class AssistantTurnService:
@@ -128,6 +130,10 @@ class AssistantTurnService:
         # the process-local auditor when no pool exists.
         self._auditor = auditor if auditor is not None else default_auditor()
         self._semantic_compiler_cache: SemanticCompiler | UnavailableSemanticCompiler | None = None
+        self._latency_bag: dict[str, Any] | None = None
+        # HTTP builds a service per request; the voice agent reuses one. Set and
+        # cleared per turn, same as _latency_bag, so a GUI model pick cannot leak.
+        self._turn_reasoner: ReasoningProvider | None = None
 
     async def answer(
         self,
@@ -142,18 +148,44 @@ class AssistantTurnService:
         on_spoken_phrase: SpokenPhraseFn | None = None,
         on_progress: ProgressFn | None = None,
     ) -> TurnResult:
-        with get_tracer().span("turn", mode=mode, principal_id=scope.principal_id):
-            result = await self._answer(
-                scope,
-                question,
-                mode=mode,
-                conversation_id=conversation_id,
-                selected_file_id=selected_file_id,
-                model=model,
-                cancellation=cancellation,
-                on_spoken_phrase=on_spoken_phrase,
-                on_progress=on_progress,
-            )
+        bag: dict[str, Any] = {}
+        self._latency_bag = bag
+        self._turn_reasoner = self._reasoner_for(model)
+        started = time.perf_counter()
+        first_token_at: list[float] = []
+
+        async def timed_progress(event: str, data: dict[str, Any]) -> None:
+            if event == "answer_delta" and not first_token_at:
+                first_token_at.append(time.perf_counter())
+            if on_progress is not None:
+                await on_progress(event, data)
+
+        try:
+            with get_tracer().span("turn", mode=mode, principal_id=scope.principal_id):
+                result = await self._answer(
+                    scope,
+                    question,
+                    mode=mode,
+                    conversation_id=conversation_id,
+                    selected_file_id=selected_file_id,
+                    model=model,
+                    cancellation=cancellation,
+                    on_spoken_phrase=on_spoken_phrase,
+                    on_progress=timed_progress,
+                )
+        finally:
+            self._latency_bag = None
+            self._turn_reasoner = None
+        bag["e2e_ms"] = (time.perf_counter() - started) * 1000
+        bag["ttft_ms"] = (
+            (first_token_at[0] - started) * 1000 if first_token_at else None
+        )
+        bag.update(_planner_latency_from_trace(result.trace))
+        bag["planner_attempts"] = result.planner_attempts
+        bag["review_attempts"] = result.review_attempts
+        bag["cached_tokens"] = (result.planner_usage or {}).get("cached_tokens")
+        bag["planner_unavailable"] = result.status == "planner_unavailable"
+        result.latency = bag
         await self._auditor.record(
             event_type="query_completed" if result.status == "answered" else result.status,
             principal_id=scope.principal_id,
@@ -434,11 +466,18 @@ class AssistantTurnService:
             return result
 
     def _reasoner_for(self, model: str | None):
-        """The reasoner for this turn, honouring a model the researcher picked.
+        """The reasoner that *answers* this turn, honouring a model the researcher picked.
+
+        QueryRequest.model is answer-only. Planning and review always use the service
+        default (PLANNER_MODEL). This helper is for synthesis, whole-list narrative,
+        and general conversation.
 
         The service is built once per request by a FastAPI dependency, before the body is
-        available, so the model cannot be chosen at construction time. Providers are cached
-        per model in the factory, so selecting one costs a dict lookup.
+        available, so the model cannot be chosen at construction time. The voice agent
+        reuses one instance across turns, so the caller assigns the result to
+        ``_turn_reasoner`` at the start of ``answer`` and clears it in the same
+        ``finally`` as ``_latency_bag``. Providers are cached per model in the factory,
+        so selecting one costs a dict lookup.
 
         Falls back to the configured reasoner whenever no model was named, the name is not
         on the allowlist, or the factory cannot build one -- a bad model name must not turn
@@ -455,6 +494,12 @@ class AssistantTurnService:
         except Exception:
             logger.warning("could not build a provider for model %s", model, exc_info=True)
             return self._reasoner
+
+    def _answer_reasoner(self) -> ReasoningProvider | None:
+        """Provider that writes the answer. Planning uses ``self._reasoner`` instead."""
+        if self._turn_reasoner is not None:
+            return self._turn_reasoner
+        return self._reasoner
 
     async def _answer_ai(
         self,
@@ -554,7 +599,7 @@ class AssistantTurnService:
                 memory_text=_memory_text(conversation),
                 input_mode="voice" if mode == "voice" else "text",
                 selected_file_id=selected,
-                reasoner=self._reasoner_for(model),
+                reasoner=self._reasoner,
                 authorized_catalog=authorized_catalog,
             )
         except PlanValidationError as exc:
@@ -867,7 +912,8 @@ class AssistantTurnService:
         then runs the compiled QueryPlan exactly as before, so this is additive.
         """
         settings = get_settings()
-        if not settings.whole_list_answer or self._reasoner is None:
+        reasoner = self._answer_reasoner()
+        if not settings.whole_list_answer or reasoner is None:
             return None
 
         total = await self._gateway.count_records(scope, (file_id,), [])
@@ -906,7 +952,7 @@ class AssistantTurnService:
             dataset_label=label,
         )
         with get_tracer().span("llm", planner_type="whole_list"):
-            synthesis = await self._reasoner.answer_structured(
+            synthesis = await reasoner.answer_structured(
                 system=WHOLE_LIST_SYSTEM, user=prompt
             )
         # Unchanged from every other synthesized path: a citation outside the packet is
@@ -1099,11 +1145,15 @@ class AssistantTurnService:
             },
         )
 
+        retrieval_started = time.perf_counter()
         with get_tracer().span("retrieval", file_ids=list(plan.scope.file_ids)):
             execution = await QueryExecutor(self._gateway, catalog).execute(
                 plan, scope, cancellation=cancel
             )
+        self._note_latency("retrieval_ms", (time.perf_counter() - retrieval_started) * 1000)
+        persist_started = time.perf_counter()
         await self._record_query_run(plan, execution, status="cancelled" if cancel.cancelled else "completed")
+        self._note_latency("persist_ms", (time.perf_counter() - persist_started) * 1000, add=True)
         await _emit_progress(
             on_progress,
             "retrieval_completed",
@@ -1138,7 +1188,8 @@ class AssistantTurnService:
         inference = False
         spoken_text = None
         streamed = False
-        if self._should_synthesize(question, plan, route) and self._reasoner is not None:
+        if self._should_synthesize(question, plan, route) and self._answer_reasoner() is not None:
+            synth_started = time.perf_counter()
             with get_tracer().span("llm", planner_type=planner_type):
                 synthesis, packet = await self._synthesize(
                     question,
@@ -1150,6 +1201,7 @@ class AssistantTurnService:
                     on_spoken_phrase=on_spoken_phrase,
                     catalog=catalog,
                 )
+            self._note_latency("synthesis_ms", (time.perf_counter() - synth_started) * 1000)
             answer = synthesis.answer
             citations = synthesis.citations
             inference = synthesis.inference
@@ -1287,7 +1339,7 @@ class AssistantTurnService:
             if spoken and on_spoken_phrase is not None:
                 await _emit_phrases(spoken, cancel, on_spoken_phrase)
             await _emit_progress(on_progress, "answer_delta", {"text": answer})
-        elif general_conversation and self._reasoner is not None and not explicit_general_response:
+        elif general_conversation and self._answer_reasoner() is not None and not explicit_general_response:
             answer = await self._answer_general(
                 question,
                 conversation,
@@ -1341,7 +1393,9 @@ class AssistantTurnService:
         memory = _memory_text_for_general(conversation)
         user = question if not memory else f"Recent conversation:\n{memory}\n\nUser request:\n{question}"
         parts: list[str] = []
-        async for delta in self._reasoner.stream_answer(system=GENERAL_ANSWER_SYSTEM, user=user):
+        reasoner = self._answer_reasoner()
+        assert reasoner is not None
+        async for delta in reasoner.stream_answer(system=GENERAL_ANSWER_SYSTEM, user=user):
             cancel.raise_if_cancelled()
             if delta:
                 parts.append(delta)
@@ -1403,16 +1457,29 @@ class AssistantTurnService:
             on_progress=on_progress,
         )
 
+    def _note_latency(self, name: str, elapsed_ms: float, *, add: bool = False) -> None:
+        bag = self._latency_bag
+        if bag is None:
+            return
+        if add:
+            bag[name] = float(bag.get(name) or 0.0) + float(elapsed_ms)
+        else:
+            bag[name] = float(elapsed_ms)
+
     async def _planning_catalog(self, scope: AccessScope) -> FieldCatalog:
-        loader = getattr(self._gateway, "load_catalog", None)
-        if callable(loader):
-            try:
-                loaded = await loader(scope)
-                return loaded.for_scope(scope)
-            except Exception:
-                if get_settings().app_env == "production":
-                    raise
-        return (self._catalog or static_catalog()).for_scope(scope)
+        started = time.perf_counter()
+        try:
+            loader = getattr(self._gateway, "load_catalog", None)
+            if callable(loader):
+                try:
+                    loaded = await loader(scope)
+                    return loaded.for_scope(scope)
+                except Exception:
+                    if get_settings().app_env == "production":
+                        raise
+            return (self._catalog or static_catalog()).for_scope(scope)
+        finally:
+            self._note_latency("catalog_ms", (time.perf_counter() - started) * 1000)
 
     def _should_synthesize(
         self,
@@ -1443,14 +1510,15 @@ class AssistantTurnService:
         on_spoken_phrase: SpokenPhraseFn | None = None,
         catalog: FieldCatalog | None = None,
     ) -> tuple[SynthesisAnswer, EvidencePacket]:
-        assert self._reasoner is not None
+        reasoner = self._answer_reasoner()
+        assert reasoner is not None
         packet = _packet_for_synthesis(question, execution, catalog)
         prompt = synthesis_user_prompt(question, packet, _memory_text(conversation), mode=mode)
         if mode == "voice":
             spoken_parts: list[str] = []
             buffer = PhraseBuffer()
             buffer.start("voice-synth")
-            async for delta in self._reasoner.stream_answer(system=SYNTHESIS_SYSTEM, user=prompt):
+            async for delta in reasoner.stream_answer(system=SYNTHESIS_SYSTEM, user=prompt):
                 if cancel is not None:
                     cancel.raise_if_cancelled()
                 for phrase in buffer.push(delta):
@@ -1471,7 +1539,7 @@ class AssistantTurnService:
                 inference=False,
             )
             return validate_synthesis(raw, packet, scope), packet
-        raw = await self._reasoner.answer_structured(system=SYNTHESIS_SYSTEM, user=prompt)
+        raw = await reasoner.answer_structured(system=SYNTHESIS_SYSTEM, user=prompt)
         return validate_synthesis(raw, packet, scope), packet
 
     async def _answer_reference(
@@ -1642,7 +1710,9 @@ class AssistantTurnService:
             citations=citations,
             source_actions=source_actions,
         )
+        started = time.perf_counter()
         await self._store.save(conversation)
+        self._note_latency("persist_ms", (time.perf_counter() - started) * 1000, add=True)
 
     async def _record_query_run(
         self,
@@ -2263,6 +2333,24 @@ def _field_dataset_suggestion(
                         continue
                     matches.add(dataset.file_id)
     return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _planner_latency_from_trace(trace: object) -> dict[str, Any]:
+    if not isinstance(trace, list):
+        return {}
+    timings: dict[str, Any] = {}
+    final_response = None
+    for layer in trace:
+        if not isinstance(layer, dict):
+            continue
+        if layer.get("layer") == "route":
+            timings = dict(layer.get("timings_ms") or {})
+            final_response = layer.get("final_response")
+    return {
+        "plan_ms": timings.get("ai_planner_ms"),
+        "review_ms": timings.get("ai_self_review_ms"),
+        "final_response": final_response,
+    }
 
 
 def _copy_planner_meta(result: TurnResult, route: PlanRouteResult) -> None:

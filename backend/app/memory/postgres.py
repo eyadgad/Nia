@@ -154,6 +154,27 @@ class PostgresMemoryStore:
             raise PermissionError("conversation is not in this access scope")
         return _from_row(dict(row), scope.principal_id)
 
+    async def delete(self, scope: AccessScope, conversation_id: str) -> bool:
+        """Forget one conversation, with its state, messages, frames and result sets.
+
+        The principal is part of the DELETE rather than a check before it, so there is no
+        window between deciding and deleting, and a conversation belonging to someone else
+        is indistinguishable from one that never existed. Every child table cascades;
+        assistant.audit_events deliberately does not -- it records that a question was asked
+        and answered, which a researcher tidying their sidebar does not get to erase.
+        """
+        async with self._pool.acquire() as conn:
+            deleted = await conn.fetchval(
+                """
+                DELETE FROM assistant.conversations
+                WHERE id = $1::uuid AND principal_id = $2
+                RETURNING 1
+                """,
+                _validated_id(conversation_id),
+                scope.principal_id,
+            )
+        return deleted is not None
+
 
 def snapshot_record(record: ConversationRecord) -> dict[str, Any]:
     return _snapshot(record)

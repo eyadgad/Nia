@@ -1,6 +1,12 @@
 services:
   postgres:
     image: postgres:16
+    # Every other long-running service already restarts; the database did not, so a Docker
+    # or WSL restart brought the stack back with no database under it -- backend unhealthy,
+    # every turn failing, and three benchmark runs destroyed mid-flight before the cause was
+    # found. migrate is deliberately left without a policy: it is a one-shot job the others
+    # wait on with service_completed_successfully, and restarting it would re-run migrations.
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nia}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

@@ -132,10 +132,20 @@ def rewrite_for(plan: QueryPlan, catalog: FieldCatalog, corrected: str) -> Query
 
 
 def from_rows(searched_for: str, rows: list[dict[str, Any]]) -> NameCorrection | None:
-    """Build a correction from the gateway's suggestions, dropping exact matches.
+    """Build a correction from the gateway's suggestions, or None if there is nothing to correct.
 
-    A zero-distance row cannot be why the search failed, so it is not a suggestion.
+    A name that the list actually records was not misspelt, whatever the query returned. So
+    an exact match anywhere in the index is not a weaker suggestion to be filtered out -- it
+    is proof that this feature has no business here, and the zero came from somewhere else.
+
+    That distinction matters because getting it wrong is worse than staying quiet. Asked
+    about four students named York, a plan that bound "York" to the wrong name field
+    returned nothing, and this offered "Did you mean Albert Voerk?" -- inventing a spelling
+    problem, hiding a real one, and sending the researcher after a person who is not the one
+    they asked about.
     """
+    if any(int(row.get("distance") or 0) == 0 for row in rows):
+        return None
     suggestions = tuple(
         NameSuggestion(
             display_name=str(row.get("display_name") or "").strip(),

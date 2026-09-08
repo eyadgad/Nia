@@ -6,7 +6,7 @@ from contextlib import suppress
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.concurrency.cancellation import CancellationToken
@@ -18,6 +18,7 @@ from app.db.pool import get_pool
 from app.execution.turn import AssistantTurnService, TurnResult
 from app.llm.factory import allowed_models, get_reasoning_provider
 from app.memory.store import default_memory_store
+from app.observability.audit import default_auditor
 from app.security.access_scope import AccessScope
 from app.security.deps import get_access_scope
 from app.tts.base import ensure_no_tts_in_text_mode
@@ -153,6 +154,36 @@ async def get_conversation(
         "rolling_summary": record.rolling_summary,
         "turns": [_public_turn(turn) for turn in record.recent_turns],
     }
+
+
+@router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(
+    conversation_id: str,
+    scope: AccessScope = Depends(get_access_scope),
+    store=Depends(_memory_store),
+) -> Response:
+    """Forget one of this principal's conversations.
+
+    A conversation that belongs to someone else answers 404, the same as one that never
+    existed: a different status would let anyone probe which ids are real. The audit trail
+    is not part of what is forgotten, and the deletion is itself recorded -- the sidebar is
+    the researcher's to tidy, the record of what was asked is not theirs to erase.
+    """
+    try:
+        deleted = await store.delete(scope, conversation_id)
+    except PermissionError:
+        deleted = False
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="conversation not found") from exc
+    if not deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="conversation not found")
+    await default_auditor().record(
+        event_type="conversation_deleted",
+        principal_id=scope.principal_id,
+        authorization_outcome="allowed",
+        conversation_id=conversation_id,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/datasets")

@@ -6,7 +6,7 @@ The application default is `PLANNER_MODE=ai`. Restore the legacy compiler withou
 
 ```bash
 # WSL / Compose — one step
-PLANNER_MODE=legacy docker compose -f infra/docker-compose.yml up -d backend agent
+PLANNER_MODE=legacy docker compose --env-file .env -f infra/docker-compose.yml up -d backend agent
 ```
 
 Or set `PLANNER_MODE=legacy` in `.env` and restart `backend` and `agent`. Confirm `GET /ready` is healthy, then run one public smoke (`How many records are in the master list?` on file 49) and one private smoke (`How many records are in additional deaths?` on file 93 with a granted principal). Settings are process-cached: a restart is required.

@@ -155,6 +155,8 @@ class Settings(BaseSettings):
     planner_min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     planner_requirement_check: bool = True
     planner_self_review: bool = True
+    planner_review_mode: Literal["off", "always"] = "always"
+    planner_model: str = ""
     planner_review_model: str = ""
 
     # A list small enough to read in full is answered from its rows rather than by

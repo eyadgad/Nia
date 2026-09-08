@@ -194,7 +194,7 @@ Phase 2 start: 2026-09-02. Stability clock starts after production smoke, not at
 One step:
 
 ```bash
-PLANNER_MODE=legacy docker compose -f infra/docker-compose.yml up -d backend agent
+PLANNER_MODE=legacy docker compose --env-file .env -f infra/docker-compose.yml up -d backend agent
 ```
 
 Or set `PLANNER_MODE=legacy` in `.env` and restart `backend` and `agent`. Do not reset `infra_nia_pg_data`. Do not delete traces or audit rows.

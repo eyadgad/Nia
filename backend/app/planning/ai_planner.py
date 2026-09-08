@@ -11,7 +11,7 @@ from typing import Any, Literal
 from pydantic import ValidationError
 
 from app.config import get_settings
-from app.llm.base import ReasoningProvider, StructuredOutputResult
+from app.llm.base import ReasoningProvider, StructuredOutputResult, TransientReasoningError
 from app.planning.ai_catalog_coerce import coerce_planned_turn
 from app.planning.ai_turn_schema import (
     PlannedConversationAction,
@@ -32,7 +32,10 @@ from app.planning.query_plan_builder import (
     UnsupportedFieldsError,
     build_query_plan,
 )
-from app.planning.requirement_parity import check_requirement_parity
+from app.planning.requirement_parity import (
+    check_requirement_parity,
+    unaccounted_conditions,
+)
 from app.planning.response_policy import (
     canned_response,
     only_clarification,
@@ -65,7 +68,12 @@ class PlannerContractError(ValueError):
 # as context is a better answer than asking the researcher to restate a clear
 # question. access_restricted is deliberately absent: that one always fails closed.
 _REVIEWABLE_VALIDATION_CODES = frozenset(
-    {"unknown_field", "dropped_requirement", "response_contract", "op_contract"}
+    # "operator" belongs with "unknown_field": both are the planner naming something the
+    # registry does not support on that field, and both are fixable by looking at the
+    # catalog again. Only unknown_field was salvageable, so "list students whose names
+    # start with Z" died on STARTS_WITH being unavailable for the field it chose, with a
+    # perfectly good alternative field on the same list.
+    {"unknown_field", "operator", "dropped_requirement", "response_contract", "op_contract"}
 )
 
 PLANNER_UNAVAILABLE_TEXT = {
@@ -443,6 +451,27 @@ class AIPlanner:
                     None,
                     retry_count,
                 )
+            except TransientReasoningError as exc:
+                # A timeout or a busy node says nothing about the question, so the second
+                # attempt sends it again unchanged rather than the schema-retry preamble.
+                last_error = _sanitize_error(exc)
+                logger.warning("ai planner primary transient failure: %s", last_error)
+                if attempts == 1:
+                    continue
+                return (
+                    PlannerStageResult(
+                        stage="primary",
+                        status="unavailable",
+                        provider=self.provider_name,
+                        model=self.model_name,
+                        attempts=attempts,
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        usage=usage,
+                        error=last_error,
+                    ),
+                    None,
+                    retry_count,
+                )
             except Exception as exc:
                 last_error = _sanitize_error(exc)
                 logger.warning("ai planner primary provider failure: %s", last_error)
@@ -479,6 +508,8 @@ class AIPlanner:
         catalog: FieldCatalog,
         selected_file_id: int,
         validation_error: str = "",
+        unaccounted: tuple[str, ...] = (),
+        absent_fields: tuple[str, ...] = (),
     ) -> PlannerStageResult:
         started = time.perf_counter()
         user = _review_user_prompt(
@@ -487,6 +518,8 @@ class AIPlanner:
             catalog,
             selected_file_id,
             validation_error=validation_error,
+            unaccounted=unaccounted,
+            absent_fields=absent_fields,
         )
         try:
             result = await self._call(self._review_provider, AI_REVIEW_SYSTEM, user, PlanReviewResponse)
@@ -632,13 +665,39 @@ def _option_names(option: AuthorizedDatasetOption) -> tuple[str, ...]:
     return (option.label, *option.aliases)
 
 
+def _singular(word: str) -> str:
+    """A crude stem, enough to let a plural label meet a singular mention."""
+    if len(word) > 3 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _phrase_tokens(text: str) -> list[str]:
+    """Comparable words: casefolded, punctuation dropped, plurals folded."""
+    return [_singular(word) for word in re.findall(r"[a-z0-9]+", text.casefold())]
+
+
 def _text_names_option(text: str, option: AuthorizedDatasetOption) -> bool:
-    haystack = _norm_label(text)
+    """Whether the text names this list, by words rather than by substring.
+
+    Substring matching missed the way people actually write. "List the first 5 additional
+    death names" does not contain the string "additional deaths", so a question about the
+    selected list read as a question about no list at all, and the reviewer's objection that
+    the list holds no such thing went unchallenged. Matching word runs with plurals folded
+    lets the label meet the mention, and is stricter at the edges than a substring ever was:
+    "master" no longer matches inside "postmaster".
+    """
+    haystack = _phrase_tokens(text)
     if not haystack:
         return False
     for name in _option_names(option):
-        label = _norm_label(name)
-        if label and label in haystack:
+        needle = _phrase_tokens(name)
+        if not needle or len(needle) > len(haystack):
+            continue
+        span = len(needle)
+        if any(haystack[i : i + span] == needle for i in range(len(haystack) - span + 1)):
             return True
     return False
 
@@ -673,6 +732,80 @@ def should_honor_dataset_not_selected(
             return False
         return True
     return _text_names_other_option(question, selected_file_id, options)
+
+
+def question_names_only_the_selected_list(
+    question: str,
+    selected_file_id: int,
+    options: list[AuthorizedDatasetOption],
+) -> bool:
+    """True when the user named the list they are already on, and no other authorized list.
+
+    Registry labels and aliases decide this, so it carries no dataset vocabulary of its own.
+    """
+    selected = next((item for item in options if item.file_id == selected_file_id), None)
+    if selected is None:
+        return False
+    return _text_names_option(question, selected) and not _text_names_other_option(
+        question, selected_file_id, options
+    )
+
+
+def _field_phrases(spec) -> list[list[str]]:
+    """Every way this field can be named, as comparable word runs."""
+    names = [spec.human_label, spec.semantic_field.replace("_", " "), *spec.aliases]
+    return [tokens for tokens in (_phrase_tokens(name) for name in names) if tokens]
+
+
+def absent_fields_named(
+    question: str,
+    selected_file_id: int,
+    catalog: FieldCatalog,
+) -> list[str]:
+    """Fields some authorized list records, named in the question, that this list has not.
+
+    Only multi-word names count. A single broad word is exactly how the wrong field gets
+    picked in the first place -- "student number" was answered from student_name, whose
+    aliases include the bare word "student", giving a confident count of records that have a
+    name where the researcher asked about a number the list does not record. One word is
+    evidence of very little; two in sequence are evidence of a field.
+    """
+    tokens = _phrase_tokens(question)
+    if not tokens:
+        return False
+
+    def present(needle: list[str]) -> bool:
+        span = len(needle)
+        if not span or span > len(tokens):
+            return False
+        return any(tokens[i : i + span] == needle for i in range(len(tokens) - span + 1))
+
+    selected = [
+        phrase
+        for spec in catalog.planner_fields_for(selected_file_id)
+        for phrase in _field_phrases(spec)
+    ]
+    found: list[str] = []
+    for spec in catalog.fields:
+        if spec.file_id == selected_file_id:
+            continue
+        for needle in _field_phrases(spec):
+            if len(needle) < 2 or not present(needle):
+                continue
+            if any(phrase == needle for phrase in selected):
+                continue
+            if spec.human_label not in found:
+                found.append(spec.human_label)
+            break
+    return found
+
+
+def question_names_field_absent_from_selected(
+    question: str,
+    selected_file_id: int,
+    catalog: FieldCatalog,
+) -> bool:
+    return bool(absent_fields_named(question, selected_file_id, catalog))
 
 
 def _assert_grounded_dataset_not_selected(
@@ -816,6 +949,8 @@ def _review_user_prompt(
     catalog: FieldCatalog,
     selected_file_id: int,
     validation_error: str = "",
+    unaccounted: tuple[str, ...] = (),
+    absent_fields: tuple[str, ...] = (),
 ) -> str:
     fields = [_field_line(spec) for spec in catalog.planner_fields_for(selected_file_id)]
     # Same prefix reasoning as the planner prompt: the catalog is identical on every turn,
@@ -836,6 +971,37 @@ def _review_user_prompt(
                 "Do not invent fields from another list. group_by for 'most common X' is X, never count.",
             ]
         )
+    if unaccounted:
+        # Present only when the plan actually carries such a condition, so the prompt
+        # every ordinary turn sends is unchanged byte for byte, and the cacheable
+        # catalog prefix above it is untouched either way.
+        lines.extend(
+            [
+                "CONDITIONS NOT STATED AS REQUIREMENTS:",
+                *(f"- {item}" for item in unaccounted),
+                "The plan filters on these and does not claim them as requirements. "
+                "Read QUESTION and decide each one: if the question does not ask for "
+                "it, return the corrected plan without it; if the question does ask "
+                "for it, keep it and state it as a requirement. Never drop a condition "
+                "the question asks for.",
+            ]
+        )
+
+    if absent_fields:
+        # Present only when the question names a field this list does not record, so
+        # the ordinary prompt is unchanged. Without it the reviewer approved answering
+        # "how many potential records have a student number" from student_name.
+        lines.extend(
+            [
+                "NAMED BUT NOT ON THIS LIST:",
+                *(f"- {item}" for item in absent_fields),
+                "The question names these and the selected list does not record them. "
+                "Do not answer them from a different field whose name merely overlaps. "
+                "If the plan does that, return needs_clarification saying the selected "
+                "list does not record it.",
+            ]
+        )
+
     return "\n".join(lines)
 
 
@@ -968,8 +1134,9 @@ async def plan_user_turn_ai(
     if provider is None:
         from app.llm.factory import get_reasoning_provider
 
-        review_model = settings.planner_review_model.strip() or None
-        provider = get_reasoning_provider()
+        planner_model = settings.planner_model.strip() or None
+        review_model = settings.planner_review_model.strip() or planner_model
+        provider = get_reasoning_provider(planner_model)
         review_provider = get_reasoning_provider(review_model) if review_model else provider
     else:
         review_provider = provider
@@ -1076,6 +1243,7 @@ async def plan_user_turn_ai(
         question=question,
         scope=scope,
         catalog=scoped,
+        authorized_options=options,
         selected_file_id=selected_file_id,
         context=context,
         input_mode=input_mode,
@@ -1098,6 +1266,7 @@ async def _validate_and_route(
     normalized: NormalizedTurn,
     timing: TimingRecorder,
     common: dict[str, Any],
+    authorized_options: list[AuthorizedDatasetOption] | None = None,
     already_reviewed_correction: bool = False,
 ) -> PlanRouteResult:
     settings = get_settings()
@@ -1136,6 +1305,10 @@ async def _validate_and_route(
             )
         if settings.planner_requirement_check:
             check_requirement_parity(planned, validated)
+        # Conditions the plan filters on that it never claimed as requirements. Handed to the
+        # review below rather than acted on here: at this layer an invented filter and an
+        # under-declared one look identical, and only the question tells them apart.
+        unaccounted = tuple(unaccounted_conditions(planned, validated))
         policy = resolve_final_response(validated)
         if only_reference(validated):
             return PlanRouteResult(
@@ -1196,12 +1369,20 @@ async def _validate_and_route(
             planner is not None
             and not already_reviewed_correction
             and get_settings().planner_self_review
+            and get_settings().planner_review_mode == "always"
             and result.planned is not None
             and _review_eligible(result.planned)
         ):
             with timing.measure("ai_self_review_ms"):
                 review_stage = await planner._review(
-                    question, result.planned, catalog, selected_file_id
+                    question,
+                    result.planned,
+                    catalog,
+                    selected_file_id,
+                    unaccounted=unaccounted,
+                    absent_fields=tuple(
+                        absent_fields_named(question, selected_file_id, catalog)
+                    ),
                 )
             common["review_attempts"] = review_stage.attempts
             common["planner_total_model_calls"] = (
@@ -1234,6 +1415,37 @@ async def _validate_and_route(
                 verdict = None
             else:
                 verdict = (review_stage.output_metadata or {}).get("verdict")
+            if (
+                verdict == "needs_clarification"
+                and question_names_only_the_selected_list(
+                    question, selected_file_id, authorized_options or []
+                )
+                # ... and the objection cannot be about a field this list genuinely lacks.
+                # Without this the overrule is worse than the bug it fixes: "how many
+                # potential records have a student number" names the selected list too, so a
+                # correct refusal would be overruled into answering from student_name -- 53
+                # records that have a name, for a number the list does not record.
+                and not question_names_field_absent_from_selected(
+                    question, selected_file_id, catalog
+                )
+            ):
+                # The reviewer asked which list this is about when the question named the
+                # selected list itself -- "how many records are in additional deaths?" on
+                # Additional Deaths came back "the selected list does not contain records
+                # about additional deaths", every time. The premise is checkably false, and
+                # the same falsehood is already refused on the primary path by
+                # _assert_grounded_dataset_not_selected; review simply had no equivalent.
+                #
+                # Overruled rather than corrected, on this file's own rule that review is a
+                # safety net over an executable plan and not a gate in front of one: the
+                # candidate has passed bind, validate, build and predicate, so a clarifying
+                # question nobody needs must not replace an answer we can give.
+                logger.warning(
+                    "ai planner review asked to clarify a question that names the selected "
+                    "list; keeping validated plan"
+                )
+                common["review_status"] = "clarification_overruled"
+                verdict = None
             if verdict == "needs_clarification":
                 question_text = str((review_stage.output_metadata or {}).get("question") or "")
                 return PlanRouteResult(
@@ -1270,6 +1482,7 @@ async def _validate_and_route(
                         question=question,
                         scope=scope,
                         catalog=catalog,
+                        authorized_options=authorized_options,
                         selected_file_id=selected_file_id,
                         context=context,
                         input_mode=input_mode,
@@ -1278,7 +1491,11 @@ async def _validate_and_route(
                         common=common,
                         already_reviewed_correction=True,
                     )
-            if review_stage.status == "ok":
+            if review_stage.status == "ok" and common.get("review_status") != (
+                "clarification_overruled"
+            ):
+                # The call itself succeeded, so "ok" alone would relabel an overruled
+                # clarification as a clean bill of health and hide it from the traces.
                 common["review_status"] = "complete"
         elif not already_reviewed_correction:
             common["review_status"] = "skipped"
@@ -1349,6 +1566,7 @@ async def _validate_and_route(
                         question=question,
                         scope=scope,
                         catalog=catalog,
+                        authorized_options=authorized_options,
                         selected_file_id=selected_file_id,
                         context=context,
                         input_mode=input_mode,
@@ -1424,13 +1642,29 @@ def _frame_map(context: ConversationContext) -> dict[str, Any]:
     return frames
 
 
+_SAFE_CLARIFICATIONS = {
+    "invalid_followup": "Which records would you like me to look at?",
+    "op_contract": "Those conditions contradict each other. Could you restate the request?",
+    "response_contract": "I need to treat that as a records question. Could you restate it?",
+    "unknown_field": "That field is not available on the selected list.",
+    "operator": "I can't filter that field that way on the selected list. Could you restate it?",
+    "unknown_dataset": "I can only answer using the currently selected list.",
+    "scope": "I can only answer using the currently selected list.",
+    "budget": "That request covered too much at once. Could you narrow it?",
+}
+
+
 def _safe_clarification(exc: PlanValidationError) -> str:
-    if exc.code == "invalid_followup":
-        return "Which records would you like me to look at?"
-    if exc.code == "op_contract":
-        return "Those conditions contradict each other. Could you restate the request?"
-    if exc.code == "response_contract":
-        return "I need to treat that as a records question. Could you restate it?"
-    if exc.code == "unknown_field":
-        return "That field is not available on the selected list."
-    return str(exc) or "Could you say that another way?"
+    """What the researcher is told when a plan does not validate.
+
+    Never the exception text. These messages are written for whoever has to fix the plan,
+    not for whoever asked the question -- "operator STARTS_WITH is not allowed on
+    name_search for file 49" reached a researcher verbatim -- and the codes for a refused
+    table or refused SQL would put internal schema names in a chat transcript. Only the
+    enumerated codes get wording; anything else falls back to a sentence that says the
+    request could not be worked out, and the raw text stays on `detail` for the trace.
+    """
+    return _SAFE_CLARIFICATIONS.get(
+        exc.code or "",
+        "I wasn't able to work out how to answer that. Could you say it another way?",
+    )

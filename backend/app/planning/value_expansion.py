@@ -189,7 +189,16 @@ def _rewrite(
 
 
 def _unknown_terms(spec: FieldSpec) -> list[str]:
-    """Spellings this field uses to record "we do not know", from the registry."""
+    """Spellings this field uses to record "we do not know", from the registry.
+
+    Used to widen IS_KNOWN only, and deliberately not its mirror. IS_UNKNOWN was widened to
+    "blank or the literal word" here and reverted: it made "an unknown deceased status"
+    right and "missing a cause of death" wrong, because those are different questions that
+    compile to the same operator. A cause recorded as Unknown is not a missing cause -- the
+    record has a value -- so the distinction lives in the words the researcher used, which
+    the compiler no longer has. Encoding it is the planner's job: EQUALS the category for
+    "unknown", IS_UNKNOWN for "missing".
+    """
     families = (spec.validation_rules or {}).get("value_synonyms")
     if not isinstance(families, dict):
         return []

@@ -231,3 +231,58 @@ def test_text_mode_never_starts_tts():
 
 def _client_scope() -> AccessScope:
     return AccessScope(principal_id="principal-researcher", allowed_file_ids=(49, 91))
+
+
+def test_a_conversation_can_be_deleted_and_stops_being_listed():
+    store = InMemoryMemoryStore()
+    client = _client(store)
+    asked = client.post(
+        "/api/assistant/query",
+        json={"question": "How many students have names starting with S?", "mode": "text"},
+    )
+    conversation_id = asked.json()["conversation_id"]
+
+    removed = client.delete(f"/api/assistant/conversations/{conversation_id}")
+    assert removed.status_code == 204
+
+    listed = client.get("/api/assistant/conversations")
+    assert conversation_id not in {item["id"] for item in listed.json()["conversations"]}
+    assert client.get(f"/api/assistant/conversations/{conversation_id}").status_code == 404
+
+
+def test_deleting_the_same_conversation_twice_is_a_404_not_a_crash():
+    store = InMemoryMemoryStore()
+    client = _client(store)
+    asked = client.post(
+        "/api/assistant/query",
+        json={"question": "How many students have names starting with S?", "mode": "text"},
+    )
+    conversation_id = asked.json()["conversation_id"]
+    assert client.delete(f"/api/assistant/conversations/{conversation_id}").status_code == 204
+    assert client.delete(f"/api/assistant/conversations/{conversation_id}").status_code == 404
+
+
+def test_a_conversation_id_that_was_never_real_is_a_404():
+    client = _client()
+    assert client.delete("/api/assistant/conversations/not-a-uuid").status_code == 404
+    assert (
+        client.delete("/api/assistant/conversations/11111111-2222-3333-4444-555555555555").status_code
+        == 404
+    )
+
+
+def test_one_researcher_cannot_delete_another_researchers_conversation():
+    """404 rather than 403: a different status would say which ids are real."""
+    from app.memory.types import ConversationRecord
+
+    store = InMemoryMemoryStore()
+    someone_else = ConversationRecord(
+        id="99999999-8888-7777-6666-555555555555", principal_id="principal-someone-else"
+    )
+    asyncio.run(store.save(someone_else))
+
+    client = _client(store)
+    assert client.delete(f"/api/assistant/conversations/{someone_else.id}").status_code == 404
+    # And it is still there for the principal it belongs to.
+    other_scope = AccessScope(principal_id="principal-someone-else", allowed_file_ids=(49,))
+    assert asyncio.run(store.get(other_scope, someone_else.id)) is not None

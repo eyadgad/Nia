@@ -646,6 +646,13 @@ def describe_available_data(catalog: FieldCatalog, file_ids: tuple[int, ...] = (
         return "There are no authorized research records in this session."
     chunks: list[str] = []
     for dataset in datasets:
+        # Every registered field, internal matching aids included. Filtering to
+        # planner_fields_for here looked tidier -- a researcher is told the list covers
+        # "Name cell residue" -- and was wrong twice over: exposure_policy exists to keep
+        # the planner prompt small, not to decide what a person may see, and hiding only
+        # the internal subset left the answer incoherent, still listing the derived
+        # *_spellings and *_month columns while dropping *_flags and *_iso. Which derived
+        # columns belong in a schema answer is a product decision, not a filter to slip in.
         labels = [field.human_label for field in catalog.fields_for(dataset.file_id)]
         if labels:
             chunks.append(f"{dataset.user_facing_label}, covering {', '.join(labels)}")

@@ -220,6 +220,16 @@ export async function fetchConversations(): Promise<ConversationSummary[]> {
   return payload.conversations ?? [];
 }
 
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const response = await authorizedFetch(`/api/assistant/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
+  // 404 means it is already gone, which is the outcome the caller wanted.
+  if (!response.ok && response.status !== 404) {
+    throw new Error("Could not delete that conversation.");
+  }
+}
+
 export type ConversationTurn = {
   role: string;
   text: string;

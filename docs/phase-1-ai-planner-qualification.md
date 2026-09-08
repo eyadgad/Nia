@@ -35,8 +35,8 @@ Default flip is documented in [phase-2-ai-planner-rollout.md](phase-2-ai-planner
 Re-run live after rebuilding the backend image:
 
 ```sh
-docker compose -f infra/docker-compose.yml build backend
-docker compose -f infra/docker-compose.yml run --rm -e PLANNER_MODE=ai \
+docker compose --env-file .env -f infra/docker-compose.yml build backend
+docker compose --env-file .env -f infra/docker-compose.yml run --rm -e PLANNER_MODE=ai \
   -v /mnt/c/Users/gad/Desktop/nia-standalone/backend/benchmarks:/app/benchmarks:ro \
   backend python /app/benchmarks/database_question_matrix.py
 ```

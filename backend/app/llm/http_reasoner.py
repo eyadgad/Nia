@@ -25,7 +25,7 @@ import httpx
 from pydantic import BaseModel
 
 from app.config import get_settings
-from app.llm.base import StructuredOutputResult
+from app.llm.base import StructuredOutputResult, TransientReasoningError
 from app.llm.schemas import PlannedQuery, SynthesisAnswer
 
 _GLOBAL_SEMAPHORE: asyncio.Semaphore | None = None
@@ -43,6 +43,20 @@ def _global_semaphore() -> asyncio.Semaphore:
 
 class ReasoningProviderError(RuntimeError):
     """The provider answered, but not with something usable."""
+
+
+class TransientProviderError(ReasoningProviderError, TransientReasoningError):
+    """A refusal that says nothing about the request: a timeout, a 429, a 5xx.
+
+    Both parents on purpose. Callers that only care that the provider failed keep catching
+    ReasoningProviderError unchanged; the planner catches the transient half and spends its
+    second attempt instead of giving the researcher "planning service is unavailable".
+    """
+
+
+# 408 and 425 included because the host can emit either under load, and a body-less 5xx is
+# the bridge's own shape for "a node was busy" rather than anything about the prompt.
+_RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504, 522, 524})
 
 
 class HttpReasoningProvider:
@@ -104,12 +118,28 @@ class HttpReasoningProvider:
 
     async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
         client = self._http()
-        async with _global_semaphore(), self._semaphore:
-            response = await client.post("/v1/chat/completions", json=body)
+        try:
+            async with _global_semaphore(), self._semaphore:
+                # A deadline on top of httpx's own timeouts, because those are per socket
+                # operation and this one is not. A connection can be Established and dead --
+                # seen when a Docker build churned WSL networking underneath a run -- and a
+                # host that trickles bytes resets the read timeout with every one of them.
+                # Either way httpx waits forever; the event loop will not. Queueing on the
+                # semaphores is deliberately outside it, since waiting one's turn is not the
+                # host being slow.
+                async with asyncio.timeout(self._timeout_s):
+                    response = await client.post("/v1/chat/completions", json=body)
+        except TimeoutError as exc:
+            raise TransientProviderError(
+                f"reasoning provider exceeded its {self._timeout_s:.0f}s deadline"
+            ) from exc
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise TransientProviderError(f"{type(exc).__name__} from reasoning provider") from exc
         if response.status_code >= 400:
-            raise ReasoningProviderError(
-                f"{response.status_code} from reasoning provider: {response.text[:300]}"
-            )
+            detail = f"{response.status_code} from reasoning provider: {response.text[:300]}"
+            if response.status_code in _RETRYABLE_STATUS:
+                raise TransientProviderError(detail)
+            raise ReasoningProviderError(detail)
         payload = response.json()
         if isinstance(payload, dict) and payload.get("error"):
             raise ReasoningProviderError(str(payload["error"])[:300])
@@ -120,17 +150,21 @@ class HttpReasoningProvider:
     async def stream_answer(self, *, system: str, user: str) -> AsyncIterator[str]:
         client = self._http()
         body = self._body(system=system, user=user, stream=True)
-        async with _global_semaphore(), self._semaphore:
-            async with client.stream("POST", "/v1/chat/completions", json=body) as response:
-                if response.status_code >= 400:
-                    detail = (await response.aread()).decode("utf-8", "replace")
-                    raise ReasoningProviderError(
-                        f"{response.status_code} from reasoning provider: {detail[:300]}"
-                    )
-                async for line in response.aiter_lines():
-                    delta = _delta_from_sse(line)
-                    if delta:
-                        yield delta
+        try:
+            async with _global_semaphore(), self._semaphore:
+                async with client.stream("POST", "/v1/chat/completions", json=body) as response:
+                    if response.status_code >= 400:
+                        body_text = (await response.aread()).decode("utf-8", "replace")
+                        detail = f"{response.status_code} from reasoning provider: {body_text[:300]}"
+                        if response.status_code in _RETRYABLE_STATUS:
+                            raise TransientProviderError(detail)
+                        raise ReasoningProviderError(detail)
+                    async for line in response.aiter_lines():
+                        delta = _delta_from_sse(line)
+                        if delta:
+                            yield delta
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise TransientProviderError(f"{type(exc).__name__} from reasoning provider") from exc
 
     async def answer_structured(self, *, system: str, user: str) -> SynthesisAnswer:
         parsed, _meta = await self._parse(SynthesisAnswer, system=system, user=user)
@@ -168,14 +202,12 @@ class HttpReasoningProvider:
         )
         payload = await self._post(body)
         content = _content_of(payload)
-        try:
-            parsed = model_type.model_validate_json(content)
-        except Exception as exc:
-            # The planner treats a malformed structured output as its own failure mode, so
-            # say what came back rather than letting a validation error surface bare.
-            raise ReasoningProviderError(
-                f"{model_type.__name__} did not validate: {str(exc)[:200]}"
-            ) from exc
+        # A schema mismatch is deliberately allowed to surface as the ValidationError it is.
+        # The planner catches that and classifies it as invalid output, which it can review
+        # and retry. Wrapping it in a provider error instead made a recoverable disagreement
+        # about the schema read as the host being down, and the turn died with "planning
+        # service is temporarily unavailable" when a second pass would have fixed it.
+        parsed = model_type.model_validate_json(content)
         duration_ms = (time.perf_counter() - started) * 1000
         return parsed, _usage_metadata(payload, self.provider_name, self.model_name, duration_ms)
 

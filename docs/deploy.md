@@ -46,16 +46,21 @@ Reasoning uses `REASONING_PROVIDER=http` against `REASONING_BASE_URL`. Set
 `REASONING_PROVIDER=xai` to fall back to the gRPC SDK against api.x.ai, which needs an
 api.x.ai key rather than the bridge token.
 
+Run these from the repository root. `--env-file .env` is not optional: `-f infra/...` makes
+`infra/` the project directory, so compose looks for `infra/.env` when it interpolates
+`${POSTGRES_PASSWORD}` and friends. Without it the stack stops at `required variable
+POSTGRES_PASSWORD is missing a value` before building anything.
+
 Default stack (xAI TTS when `XAI_API_KEY` is set):
 
 ```bash
-docker compose -f infra/docker-compose.yml up --build
+docker compose --env-file .env -f infra/docker-compose.yml up --build
 ```
 
 High-traffic local TTS:
 
 ```bash
-docker compose -f infra/docker-compose.yml -f infra/docker-compose.kokoro.yml up --build
+docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.kokoro.yml up --build
 ```
 
 Open http://localhost:3000 and sign in with the standalone credentials stored in your untracked `.env` file.

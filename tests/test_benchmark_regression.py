@@ -117,6 +117,14 @@ def test_semantic_gate_treats_rank_fields_as_grouping_contract():
     assert result.verdict == "pass"
 
 
+def test_matrix_aborts_on_connection_loss():
+    from benchmarks.database_question_matrix import _connection_lost
+
+    assert _connection_lost(ConnectionRefusedError("postgres"))
+    assert _connection_lost(OSError(111, "Connection refused"))
+    assert not _connection_lost(ValueError("count mismatch"))
+
+
 def test_matrix_accepts_thousands_separators_and_synonym_known():
     from benchmarks.database_question_matrix import (
         Condition,

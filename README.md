@@ -17,11 +17,16 @@ repositories/      reference clones only — do not edit
 ## Quick start
 
 1. Copy `.env.example` to `.env` and set secrets.
-2. Start the local stack:
+2. Start the local stack, from the repository root:
 
 ```bash
-docker compose -f infra/docker-compose.yml up --build
+docker compose --env-file .env -f infra/docker-compose.yml up --build
 ```
+
+   `--env-file .env` is not optional: `-f infra/...` makes `infra/` the project directory, so
+   compose looks for `infra/.env` when it interpolates `${POSTGRES_PASSWORD}` and friends.
+   Without it the stack stops at `required variable POSTGRES_PASSWORD is missing a value`
+   before building anything.
 
 3. Open http://localhost:3000
 4. Sign in with the standalone credentials configured in your untracked `.env` file.
@@ -71,7 +76,7 @@ uv run python -m app.realtime.worker start
 High-traffic TTS (Kokoro, no xAI speech cost):
 
 ```bash
-docker compose -f infra/docker-compose.yml -f infra/docker-compose.kokoro.yml up --build
+docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.kokoro.yml up --build
 ```
 
 Terminal voice client (run from Windows or the host with the microphone):

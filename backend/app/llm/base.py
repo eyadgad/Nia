@@ -27,6 +27,16 @@ class StructuredOutputResult[T: BaseModel]:
     duration_ms: float = 0.0
 
 
+class TransientReasoningError(RuntimeError):
+    """The provider did not answer, and might on the next attempt.
+
+    Kept here rather than beside a provider because the planner has to be able to tell a
+    timeout from a refusal without importing one, and the distinction decides whether a turn
+    is retried or lost. A read timeout on the York thread cost the researcher a whole answer
+    that a second call would have given them.
+    """
+
+
 class ReasoningProvider(Protocol):
     """Paid reasoning boundary. Planning/retrieval/gateway must not import a vendor SDK."""
 

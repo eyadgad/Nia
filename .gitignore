@@ -40,3 +40,11 @@ docs/regression_*.md
 docs/*pipeline_results*.md
 docs/database-question-validation.md
 docs/pipeline-fixes.md
+.env.bench
+
+# Raw benchmark transcripts. These quote the records back -- expected answers for the
+# question matrix are real names from the death lists -- so they stay local, the same
+# way the review outputs and the database dump do. The summarised JSON beside them
+# carries the timings and the pass/fail classification without the rows.
+docs/*.stdout.txt
+docs/*.stderr.txt

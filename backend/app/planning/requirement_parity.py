@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +33,7 @@ from app.planning.turn_schema import (
     VerifyPreviousAction,
 )
 
+logger = logging.getLogger("nia.planning.parity")
 
 @dataclass(frozen=True)
 class RequirementMatch:
@@ -440,6 +442,31 @@ def _explode(requirements: list[StatedRequirement]) -> list[StatedRequirement]:
     return exploded
 
 
+def unaccounted_conditions(planned: PlannedTurn, bound: TurnPlan) -> list[str]:
+    """Conditions the plan carries that no stated requirement accounts for.
+
+    The reverse direction -- a stated requirement with nothing to match -- is a hard error in
+    check_requirement_parity, because dropping a condition answers a question nobody asked.
+    An invented one is just as wrong and reads exactly as confident: "records missing a cause
+    of death" came back filtered to those with a known death date too, 2 instead of 6, and
+    "missing a community" picked up a known cause of death, 0 instead of 1.
+
+    It is not an error here and nothing is deleted on this signal. The planner
+    under-declaring a filter the researcher did ask for is indistinguishable at this layer
+    from inventing one, and silently dropping the first case would be the very condition loss
+    the check above exists to prevent. So the list is handed to the reviewer, which can see
+    the question, and it decides.
+    """
+    expressed = _explode(extract_expressed(bound))
+    unused = list(expressed)
+    for stated in _explode(list(planned.stated_requirements)):
+        match_index = next((index for index, item in enumerate(unused) if _same(stated, item)), None)
+        if match_index is None:
+            continue
+        unused.pop(match_index)
+    return sorted(item.text for item in unused if item.text)
+
+
 def check_requirement_parity(planned: PlannedTurn, bound: TurnPlan) -> None:
     expressed = _explode(extract_expressed(bound))
     unused = list(expressed)
@@ -451,3 +478,9 @@ def check_requirement_parity(planned: PlannedTurn, bound: TurnPlan) -> None:
                 code="dropped_requirement",
             )
         unused.pop(match_index)
+    if unused:
+        logger.info(
+            "plan carries %d condition(s) no stated requirement accounts for: %s",
+            len(unused),
+            "; ".join(sorted(item.text for item in unused))[:300],
+        )

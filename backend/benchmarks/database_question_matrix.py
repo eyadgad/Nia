@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -708,6 +709,35 @@ def expected_summary(case: Case, expected: dict[str, Any]) -> str:
     return json.dumps(rows, ensure_ascii=False, default=str)
 
 
+def _connection_lost(exc: BaseException) -> bool:
+    """True when the database (or its proxy) went away mid-suite.
+
+    Those runs are void, not flaky cases. A refused port or dropped connection
+    after a stack restart must abort rather than grind through remaining cases.
+    """
+    name = type(exc).__name__
+    if name in {
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "InterfaceError",
+        "PostgresConnectionError",
+        "OSError",
+    }:
+        if name == "OSError" and getattr(exc, "errno", None) not in {111, 10061, 104}:
+            return False
+        return True
+    text = str(exc).casefold()
+    needles = (
+        "connection refused",
+        "connection was closed",
+        "connection does not exist",
+        "server closed the connection",
+        "could not connect to server",
+        "the database system is shutting down",
+    )
+    return any(item in text for item in needles)
+
+
 def _repeat(cases: tuple[Case, ...], runs: int) -> list[Case]:
     """Every case, `runs` times, grouped so one case's runs sit together in the log."""
     return [case for case in cases for _ in range(max(1, runs))]
@@ -795,6 +825,8 @@ async def main() -> int:
     )
     failures = 0
     report: list[dict[str, Any]] = []
+    run_started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"RUN start={run_started} cases={len(cases)} runs={args.runs} sequential=yes")
     try:
         for index, case in enumerate(_repeat(cases, args.runs), start=1):
             expected = oracle.expected(case)
@@ -805,6 +837,13 @@ async def main() -> int:
                     selected_file_id=case.file_id,
                 )
             except Exception as exc:
+                if _connection_lost(exc):
+                    print(
+                        f"VOID run: database connection lost at {case.id} "
+                        f"({type(exc).__name__}: {exc}). "
+                        "This run is not data — do not fold it into pass rates."
+                    )
+                    raise SystemExit(2) from exc
                 failures += 1
                 issue = f"runner_error {type(exc).__name__}: {exc}"
                 report.append(
@@ -836,6 +875,9 @@ async def main() -> int:
                     "issues": issues,
                     "planner": result.planner_type,
                     "ops": result.plan.op_names() if result.plan else [],
+                    "latency": dict(result.latency or {}),
+                    "review_status": result.review_status,
+                    "final_response": (result.latency or {}).get("final_response"),
                 }
             )
             print(f"[{index:02d}/{len(cases) * args.runs}] {case.id} {'PASS' if not issues else 'FAIL'}: {case.question}")

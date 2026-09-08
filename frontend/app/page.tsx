@@ -258,6 +258,26 @@ export default function HomePage() {
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
 
+  // A reported chat is titled "Reported - <name> - <when>". Marking it fixed swaps the
+  // first word and keeps the rest, so who reported it and when survive the triage.
+  const REPORTED_PREFIX = "Reported - ";
+  const FIXED_PREFIX = "Fixed - ";
+
+  async function markFixed(id: string, title: string) {
+    if (!title.startsWith(REPORTED_PREFIX)) return;
+    const next = FIXED_PREFIX + title.slice(REPORTED_PREFIX.length);
+    const previous = conversations;
+    setConversations((rows) =>
+      rows.map((row) => (row.id === id ? { ...row, title: next } : row))
+    );
+    try {
+      await renameConversation(id, next);
+    } catch (err) {
+      setConversations(previous);
+      setError(err instanceof Error ? err.message : "Could not update that conversation.");
+    }
+  }
+
   async function commitRename(id: string) {
     const title = renameDraft.trim();
     setRenamingId(null);
@@ -1005,6 +1025,24 @@ export default function HomePage() {
                               >
                                 Rename
                               </button>
+                              {/* Triage, so it belongs only on a chat that was reported.
+                                    On an ordinary conversation it is noise, and Rename
+                                    already covers anything else someone wants to call it. */}
+                              {(item.title || "").startsWith(REPORTED_PREFIX) ? (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  onClick={() => {
+                                    setMenuFor(null);
+                                    void markFixed(
+                                      item.id,
+                                      item.title || "Untitled conversation"
+                                    );
+                                  }}
+                                >
+                                  Mark as fixed
+                                </button>
+                              ) : null}
                               <button
                                 type="button"
                                 role="menuitem"

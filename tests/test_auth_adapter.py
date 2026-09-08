@@ -201,3 +201,56 @@ def test_a_broken_extra_accounts_value_never_takes_the_configured_login_down(bro
     adapter = StandaloneJwtAuthAdapter(_two_account_settings(broken))
     scope = asyncio.run(adapter.authenticate_password("dev", "dev-password"))
     assert scope.principal_id == "test-principal"
+
+
+@pytest.mark.parametrize(
+    "typed",
+    ["dev", "DEV", "Dev", " dev", "dev ", "  Dev  "],
+)
+def test_a_username_is_accepted_however_it_arrives(typed):
+    """These are printed on the sign-in screen to be copied, then typed back by a browser.
+
+    A selection catches a trailing space; a keyboard capitalises the first letter because it
+    thinks a sentence is starting. Both were refused with the same blank "sign-in failed" a
+    wrong password gets, which tells a tester nothing and cost two rounds of debugging.
+    """
+    adapter = StandaloneJwtAuthAdapter(
+        Settings(
+            jwt_secret="unit-test-secret",
+            standalone_demo_username="dev",
+            standalone_demo_password="dev-password",
+            standalone_demo_principal_id="test-principal",
+        )
+    )
+    scope = asyncio.run(adapter.authenticate_password(typed, "dev-password"))
+    assert scope.principal_id == "test-principal"
+
+
+@pytest.mark.parametrize("typed", ["tester", "TESTER", " Tester "])
+def test_the_same_leniency_applies_to_the_extra_accounts(typed):
+    adapter = StandaloneJwtAuthAdapter(
+        Settings(
+            jwt_secret="unit-test-secret",
+            standalone_demo_username="dev",
+            standalone_demo_password="dev-password",
+            standalone_demo_principal_id="test-principal",
+            standalone_extra_accounts='[{"username": "tester", "password": "tester-password"}]',
+        )
+    )
+    scope = asyncio.run(adapter.authenticate_password(typed, "tester-password"))
+    assert scope.display_name == typed
+
+
+@pytest.mark.parametrize("password", ["Dev-Password", "dev-password ", " dev-password", "wrong"])
+def test_the_password_is_still_compared_exactly(password):
+    """Leniency stops at the username. A password is what it is."""
+    adapter = StandaloneJwtAuthAdapter(
+        Settings(
+            jwt_secret="unit-test-secret",
+            standalone_demo_username="dev",
+            standalone_demo_password="dev-password",
+            standalone_demo_principal_id="test-principal",
+        )
+    )
+    with pytest.raises(AuthError):
+        asyncio.run(adapter.authenticate_password("dev", password))

@@ -14,7 +14,6 @@ import {
   submitFeedback,
   fetchConversations,
   fetchDatasets,
-  type ModelChoice,
   fetchLivekitToken,
   fetchSession,
   health,
@@ -57,7 +56,6 @@ const TEST_PASSWORD = process.env.NEXT_PUBLIC_TEST_PASSWORD || "";
 const CONV_KEY = "nia.standalone.conversation";
 const VOICE_PREF_KEY = "nia.standalone.voice-preference";
 // Persisted like the voice preference: a per-researcher choice, not conversation state.
-const MODEL_PREF_KEY = "nia.standalone.model";
 const PARTIAL_ID = "voice-partial";
 const VOICE_ASSISTANT_ID = "voice-assistant";
 
@@ -74,8 +72,6 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
-  const [models, setModels] = useState<ModelChoice[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [legacyUnscoped, setLegacyUnscoped] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -117,19 +113,12 @@ export default function HomePage() {
   useEffect(() => {
     if (!session) return;
     fetchDatasets()
-      .then(({ datasets: items, models: available }) => {
+      .then(({ datasets: items }) => {
         setDatasets(items);
         setSelectedFileId((current) =>
           current && items.some((item) => item.file_id === current)
             ? current
             : defaultDatasetId(items)
-        );
-        setModels(available);
-        // A remembered model is honoured only while the backend still offers it.
-        const stored = window.localStorage.getItem(MODEL_PREF_KEY);
-        const fallback = available.find((item) => item.selected)?.id ?? available[0]?.id ?? null;
-        setSelectedModel(
-          stored && available.some((item) => item.id === stored) ? stored : fallback
         );
       })
       .catch((err: Error) => {
@@ -216,7 +205,10 @@ export default function HomePage() {
     event.preventDefault();
     setError(null);
     try {
-      const next = await login(username, password);
+      // Trimmed here as well as on the server: these credentials are printed on the page
+      // to be copied, and a selection that catches a trailing space should not read as a
+      // wrong password.
+      const next = await login(username.trim(), password.trim());
       setSession(next);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
@@ -548,8 +540,7 @@ export default function HomePage() {
             )
           );
         }
-        },
-        selectedModel
+        }
       );
 
       if (result.conversation_id) setConversationId(result.conversation_id);
@@ -736,14 +727,6 @@ export default function HomePage() {
     window.setTimeout(() => setCopied(false), 1800);
   }
 
-  function switchModel(model: string) {
-    if (busy || model === selectedModel) return;
-    // Unlike a dataset switch this keeps the conversation: which model answers is a
-    // preference, not a change of what is being asked about.
-    setSelectedModel(model);
-    window.localStorage.setItem(MODEL_PREF_KEY, model);
-  }
-
   function switchDataset(fileId: number) {
     if (busy || fileId === selectedFileId) return;
     void voiceSession.current?.disconnect();
@@ -833,6 +816,9 @@ export default function HomePage() {
                   className="nia-field"
                   value={username}
                   autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   onChange={(event) => setUsername(event.target.value)}
                 />
               </label>
@@ -1021,24 +1007,6 @@ export default function HomePage() {
                   </button>
                 ))}
               </div>
-              {models.length > 1 && (
-                <div className="nia-dataset-toggle" role="group" aria-label="Answer model">
-                  {models.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      aria-pressed={option.id === selectedModel}
-                      className={option.id === selectedModel ? "is-selected" : ""}
-                      disabled={busy}
-                      onClick={() => switchModel(option.id)}
-                      title={modelHint(option.id)}
-                    >
-                      <span className="nia-dataset-label-full">{modelLabel(option.id)}</span>
-                      <span className="nia-dataset-label-compact">{modelLabel(option.id)}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
               <button
                 type="button"
                 onClick={() => setReportOpen(true)}
@@ -1078,8 +1046,6 @@ export default function HomePage() {
               <div className="nia-empty-state">
                 <div className="nia-empty-mark"><NiaGlyph /></div>
                 <p className="nia-eyebrow">Research desk</p>
-                <h1>Ask about the records</h1>
-                <p>NIA searches only the list this chat is using. Start with a count, a name, or what the list contains.</p>
                 {activeDataset ? (
                   <div className="nia-empty-list">
                     Working in <strong>{activeDataset.user_facing_label}</strong>
@@ -1421,24 +1387,7 @@ function starterPrompts(datasetLabel?: string | null) {
   ];
 }
 
-function modelLabel(id: string): string {
-  // "grok-4.20-0309-non-reasoning" is a build identifier, not something to show a
-  // researcher. Keep the family, say whether it reasons.
-  const family = id.replace(/^grok-/, "").split("-")[0];
-  if (id.includes("non-reasoning")) return `${family} fast`;
-  if (id.endsWith("-fast")) return `${family} fast-reasoning`;
-  return family;
-}
 
-function modelHint(id: string): string {
-  // This picks the model that writes the answer, not the one that plans the query.
-  // Planning is pinned to PLANNER_MODEL server-side so a slower pick cannot make
-  // finding the records slower -- only the wording of the reply changes.
-  if (id.includes("non-reasoning")) {
-    return `${id} - writes the answer directly`;
-  }
-  return `${id} - reasons before writing the answer, slower and more deliberate`;
-}
 
 function defaultDatasetId(datasets: Dataset[]): number | null {
   return datasets.find((item) => item.is_default_people_scope)?.file_id ?? datasets[0]?.file_id ?? null;

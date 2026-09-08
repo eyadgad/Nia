@@ -109,7 +109,11 @@ export async function login(username: string, password: string): Promise<Session
     credentials: "include",
   });
   if (!response.ok) {
-    throw new Error("Sign-in failed. Check the standalone demo credentials.");
+    throw new Error(
+      response.status === 401
+        ? "That username and password were not accepted. Check them against the ones shown here."
+        : "Sign-in is unavailable right now. Please try again."
+    );
   }
   return response.json();
 }

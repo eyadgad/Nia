@@ -42,11 +42,17 @@ class StandaloneJwtAuthAdapter(AuthAdapter):
         return accounts
 
     async def authenticate_password(self, username: str, password: str) -> AccessScope:
+        # Usernames compare without surrounding space or case, as usernames normally do.
+        # These are printed on the sign-in screen to be copied, so they arrive with a
+        # trailing space from a sloppy selection, or capitalised by a keyboard that thinks it
+        # is starting a sentence -- "User" was refused with the same blank "sign-in failed" a
+        # wrong password gets. The password is still compared exactly.
+        attempted = username.strip().casefold()
         matched: tuple[str, str, str] | None = None
         for candidate in self._accounts():
             # compare_digest on both halves, and no early exit once something matches: the
             # time this takes should not describe which usernames exist.
-            name_ok = hmac.compare_digest(username, candidate[0])
+            name_ok = hmac.compare_digest(attempted, candidate[0].strip().casefold())
             password_ok = hmac.compare_digest(password, candidate[1])
             if name_ok and password_ok:
                 matched = candidate

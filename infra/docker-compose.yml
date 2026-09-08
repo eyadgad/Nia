@@ -45,8 +45,11 @@ services:
     environment:
       ASSISTANT_DATABASE_URL: postgresql://assistant_runtime:${ASSISTANT_RUNTIME_PASSWORD:?Set ASSISTANT_RUNTIME_PASSWORD in the untracked .env file}@postgres:5432/${POSTGRES_DB:-nia}
       ASSISTANT_MIGRATOR_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the untracked .env file}@postgres:5432/${POSTGRES_DB:-nia}
-      FRONTEND_ORIGIN: http://localhost:3000
-      CORS_ORIGINS: http://localhost:3000
+      # Overridable, because a deployed frontend lives on a different origin than the one
+      # this file assumed. Hardcoding them here silently beat the .env values, since compose
+      # environment takes precedence over env_file.
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       APP_ENV: development
       AUTH_ADAPTER: standalone
       STANDALONE_DEMO_ALLOWED_FILE_IDS: "49,91,93,94"

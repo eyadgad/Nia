@@ -17,6 +17,8 @@ class MemoryStore(Protocol):
 
     async def delete(self, scope: AccessScope, conversation_id: str) -> bool: ...
 
+    async def rename(self, scope: AccessScope, conversation_id: str, title: str) -> bool: ...
+
 
 class InMemoryMemoryStore:
     """Process-local store. Same AccessScope principal_id isolation as Postgres."""
@@ -56,6 +58,15 @@ class InMemoryMemoryStore:
         if record.principal_id != scope.principal_id:
             raise PermissionError("conversation is not in this access scope")
         del self._records[conversation_id]
+        return True
+
+    async def rename(self, scope: AccessScope, conversation_id: str, title: str) -> bool:
+        record = self._records.get(conversation_id)
+        if record is None:
+            return False
+        if record.principal_id != scope.principal_id:
+            raise PermissionError("conversation is not in this access scope")
+        record.title = title
         return True
 
 

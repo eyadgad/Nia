@@ -166,6 +166,38 @@ async def get_conversation(
     }
 
 
+class RenameConversationRequest(BaseModel):
+    # Auto-titles are the first question truncated to 80; a chosen one gets a little more
+    # room, and a bound so the sidebar cannot be filled with a pasted essay.
+    title: str = Field(min_length=1, max_length=120)
+
+
+@router.patch("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def rename_conversation(
+    conversation_id: str,
+    body: RenameConversationRequest,
+    scope: AccessScope = Depends(get_access_scope),
+    store=Depends(_memory_store),
+) -> Response:
+    """Retitle one of this principal's conversations.
+
+    404 for anything that is not theirs, the same as delete: a different status would say
+    which ids are real. Only the title moves; the turns underneath it are untouched.
+    """
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="title is required")
+    try:
+        renamed = await store.rename(scope, conversation_id, title)
+    except PermissionError:
+        renamed = False
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="conversation not found") from exc
+    if not renamed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="conversation not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_conversation(
     conversation_id: str,

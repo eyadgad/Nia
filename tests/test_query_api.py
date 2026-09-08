@@ -348,3 +348,80 @@ def test_a_report_cannot_be_used_to_dump_unbounded_text():
         "/api/assistant/feedback", json={"comment": "fine", "reporter_name": "n" * 121}
     )
     assert long_name.status_code == 422
+
+
+def _make_conversation(client) -> str:
+    asked = client.post(
+        "/api/assistant/query",
+        json={"question": "How many students have names starting with S?", "mode": "text"},
+    )
+    return asked.json()["conversation_id"]
+
+
+def test_a_conversation_can_be_renamed():
+    store = InMemoryMemoryStore()
+    client = _client(store)
+    conversation_id = _make_conversation(client)
+
+    renamed = client.patch(
+        f"/api/assistant/conversations/{conversation_id}", json={"title": "Names beginning with S"}
+    )
+    assert renamed.status_code == 204
+
+    listed = client.get("/api/assistant/conversations").json()["conversations"]
+    titles = {item["id"]: item["title"] for item in listed}
+    assert titles[conversation_id] == "Names beginning with S"
+
+
+def test_renaming_leaves_the_turns_alone():
+    """A title is what the sidebar shows; the conversation underneath is untouched."""
+    store = InMemoryMemoryStore()
+    client = _client(store)
+    conversation_id = _make_conversation(client)
+    before = client.get(f"/api/assistant/conversations/{conversation_id}").json()["turns"]
+
+    client.patch(f"/api/assistant/conversations/{conversation_id}", json={"title": "Renamed"})
+
+    after = client.get(f"/api/assistant/conversations/{conversation_id}").json()
+    assert after["title"] == "Renamed"
+    assert [turn["text"] for turn in after["turns"]] == [turn["text"] for turn in before]
+
+
+def test_a_blank_or_oversized_title_is_refused():
+    client = _client()
+    conversation_id = _make_conversation(client)
+    for title in ("", "   ", "x" * 121):
+        response = client.patch(
+            f"/api/assistant/conversations/{conversation_id}", json={"title": title}
+        )
+        assert response.status_code == 422, title
+    # The original title survived every refusal.
+    assert client.get(f"/api/assistant/conversations/{conversation_id}").json()["title"]
+
+
+def test_renaming_a_conversation_that_is_not_yours_is_a_404():
+    """404 rather than 403, for the same reason delete answers 404: ids stay unguessable."""
+    from app.memory.types import ConversationRecord
+
+    store = InMemoryMemoryStore()
+    theirs = ConversationRecord(
+        id="88888888-7777-6666-5555-444444444444", principal_id="principal-someone-else"
+    )
+    theirs.title = "Their conversation"
+    asyncio.run(store.save(theirs))
+
+    client = _client(store)
+    assert (
+        client.patch(f"/api/assistant/conversations/{theirs.id}", json={"title": "mine now"}).status_code
+        == 404
+    )
+    other_scope = AccessScope(principal_id="principal-someone-else", allowed_file_ids=(49,))
+    assert asyncio.run(store.get(other_scope, theirs.id)).title == "Their conversation"
+
+
+def test_renaming_something_that_does_not_exist_is_a_404():
+    client = _client()
+    assert (
+        client.patch("/api/assistant/conversations/not-a-uuid", json={"title": "x"}).status_code
+        == 404
+    )

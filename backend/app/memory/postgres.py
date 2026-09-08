@@ -175,6 +175,28 @@ class PostgresMemoryStore:
             )
         return deleted is not None
 
+    async def rename(self, scope: AccessScope, conversation_id: str, title: str) -> bool:
+        """Retitle one conversation, if it is this principal's.
+
+        The principal is part of the UPDATE for the same reason it is part of the DELETE:
+        someone else's conversation is indistinguishable from one that never existed, and
+        there is no gap between deciding and writing. A title is only what the sidebar shows
+        -- the turns underneath it are untouched.
+        """
+        async with self._pool.acquire() as conn:
+            updated = await conn.fetchval(
+                """
+                UPDATE assistant.conversations
+                SET title = $3, updated_at = now()
+                WHERE id = $1::uuid AND principal_id = $2
+                RETURNING 1
+                """,
+                _validated_id(conversation_id),
+                scope.principal_id,
+                title,
+            )
+        return updated is not None
+
 
 def snapshot_record(record: ConversationRecord) -> dict[str, Any]:
     return _snapshot(record)
@@ -231,9 +253,12 @@ def _from_row(row: dict[str, Any], principal_id: str) -> ConversationRecord:
         raw = json.loads(raw)
     if raw:
         record = _from_snapshot(raw, principal_id)
-        # The relational column is authoritative. Older JSON snapshots do not
-        # contain the dataset binding.
+        # The relational columns are authoritative. Older JSON snapshots do not contain the
+        # dataset binding, and the title is edited in place by rename: a snapshot is written
+        # when a turn is taken, so reading the title out of it meant a rename was stored and
+        # then never shown -- the row said one thing and every endpoint said another.
         record.selected_file_id = row.get("selected_file_id") or record.selected_file_id
+        record.title = row.get("title") or record.title
         _enrich_turns(record, row.get("stored_messages"))
         return record
     return ConversationRecord(

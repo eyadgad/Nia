@@ -155,3 +155,62 @@ async def test_live_postgres_cannot_overwrite_another_principals_conversation():
                 conversation_id,
             )
         await pool.close()
+
+
+def test_a_renamed_title_wins_over_the_one_in_the_snapshot():
+    """Rename edits the column; a snapshot is written whenever a turn is taken.
+
+    Reads rebuild the record from that snapshot when there is one, so a rename was stored
+    and then never shown: the row said one thing and every endpoint said another. Nothing
+    in-memory covers this -- InMemoryMemoryStore has no snapshot layer, which is why 602
+    tests stayed green while the feature did not work.
+    """
+    import json
+
+    from app.memory.postgres import _from_row, snapshot_record
+    from app.memory.types import ConversationRecord
+
+    record = ConversationRecord(id="11111111-2222-3333-4444-555555555555", principal_id="p")
+    record.title = "how many students are recorded as deceased?"
+    record.selected_file_id = 49
+    snapshot = snapshot_record(record)
+
+    rebuilt = _from_row(
+        {
+            "id": record.id,
+            "principal_id": "p",
+            "selected_file_id": 49,
+            "title": "Deceased count check",
+            "rolling_summary": None,
+            "active_query_state": json.dumps(snapshot),
+        },
+        "p",
+    )
+    assert rebuilt.title == "Deceased count check"
+    # The snapshot still supplies everything the column does not carry.
+    assert rebuilt.selected_file_id == 49
+
+
+def test_a_conversation_with_no_chosen_title_keeps_the_snapshot_one():
+    """A null column must not blank out the auto-title the snapshot holds."""
+    import json
+
+    from app.memory.postgres import _from_row, snapshot_record
+    from app.memory.types import ConversationRecord
+
+    record = ConversationRecord(id="66666666-7777-8888-9999-000000000000", principal_id="p")
+    record.title = "how many students have a recorded community?"
+    snapshot = snapshot_record(record)
+
+    rebuilt = _from_row(
+        {
+            "id": record.id,
+            "principal_id": "p",
+            "selected_file_id": None,
+            "title": None,
+            "rolling_summary": None,
+            "active_query_state": json.dumps(snapshot),
+        },
+        "p",
+    )
+    assert rebuilt.title == "how many students have a recorded community?"

@@ -276,8 +276,8 @@ button:disabled { cursor: default; }
 .nia-history-empty { padding: 12px 10px; color: var(--subtle); font-size: 12px; line-height: 18px; }
 .nia-history-row { display: flex; align-items: center; gap: 2px; }
 .nia-history-row .nia-history-item { flex: 1; min-width: 0; }
-.nia-history-delete {
-  flex: 0 0 auto;
+.nia-history-menu { position: relative; flex: 0 0 auto; }
+.nia-history-more {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -289,19 +289,48 @@ button:disabled { cursor: default; }
   background: transparent;
   color: var(--subtle);
   cursor: pointer;
-  /* Hidden until the row is hovered so the list stays quiet, but still in the tab order:
-     :focus-visible brings it back for anyone navigating by keyboard. */
+  /* Quiet until the row is hovered, but still in the tab order: :focus-visible brings it
+     back for anyone navigating by keyboard, and an open menu stays visible. */
   opacity: 0;
   transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
 }
-.nia-history-row:hover .nia-history-delete,
-.nia-history-delete:focus-visible { opacity: 1; }
-.nia-history-delete:hover { background: var(--sidebar-hover); color: var(--danger); }
-.nia-history-delete:disabled { opacity: 0; cursor: default; }
+.nia-history-row:hover .nia-history-more,
+.nia-history-more:focus-visible,
+.nia-history-more[aria-expanded="true"] { opacity: 1; }
+.nia-history-more:hover,
+.nia-history-more[aria-expanded="true"] { background: var(--sidebar-hover); color: var(--text); }
 /* A touch screen has no hover to reveal it, so it is simply always there. */
 @media (hover: none) {
-  .nia-history-delete { opacity: 1; }
+  .nia-history-more { opacity: 1; }
 }
+.nia-history-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fffcf6;
+  box-shadow: 0 14px 34px rgba(42, 36, 24, 0.18);
+}
+.nia-history-popover button {
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+.nia-history-popover button:hover { background: var(--sidebar-hover); }
+.nia-history-popover button.is-danger { color: var(--danger); }
+.nia-history-popover button:disabled { opacity: 0.45; cursor: default; }
+.nia-history-rename { width: 100%; padding: 6px 9px; font-size: 13px; line-height: 17px; }
 .nia-sidebar.is-collapsed .nia-history { display: none; }
 .nia-sidebar-footer { padding: 8px; border-top: 1px solid rgba(0,0,0,.04); }
 .nia-account-menu { position: relative; }

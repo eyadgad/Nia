@@ -272,6 +272,20 @@ export async function fetchConversations(): Promise<ConversationSummary[]> {
   return payload.conversations ?? [];
 }
 
+export async function renameConversation(
+  conversationId: string,
+  title: string
+): Promise<void> {
+  const response = await authorizedFetch(`/api/assistant/conversations/${conversationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!response.ok) {
+    throw new Error("Could not rename that conversation.");
+  }
+}
+
 export async function deleteConversation(conversationId: string): Promise<void> {
   const response = await authorizedFetch(`/api/assistant/conversations/${conversationId}`, {
     method: "DELETE",

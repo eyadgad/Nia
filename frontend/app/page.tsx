@@ -11,6 +11,7 @@ import {
   fetchConversation,
   apiTargetIsUnreachable,
   deleteConversation,
+  renameConversation,
   submitFeedback,
   fetchConversations,
   fetchDatasets,
@@ -71,6 +72,9 @@ export default function HomePage() {
   const [apiReady, setApiReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
   const [legacyUnscoped, setLegacyUnscoped] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -132,6 +136,15 @@ export default function HomePage() {
     const storedConversation = window.localStorage.getItem(CONV_KEY);
     if (storedConversation) void restoreConversation(storedConversation);
   }, [session]);
+
+  useEffect(() => {
+    if (!menuFor) return;
+    // Any click elsewhere dismisses it, including one that opens another row's menu --
+    // the trigger stops propagation so it is not closed by its own click.
+    const close = () => setMenuFor(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [menuFor]);
 
   useEffect(() => {
     if (conversationId) window.localStorage.setItem(CONV_KEY, conversationId);
@@ -243,6 +256,23 @@ export default function HomePage() {
     setSidebarOpen(false);
     setLines([welcomeLine()]);
     window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  async function commitRename(id: string) {
+    const title = renameDraft.trim();
+    setRenamingId(null);
+    const previous = conversations;
+    const current = conversations.find((item) => item.id === id)?.title ?? "";
+    if (!title || title === current) return;
+    setConversations((rows) =>
+      rows.map((row) => (row.id === id ? { ...row, title } : row))
+    );
+    try {
+      await renameConversation(id, title);
+    } catch (err) {
+      setConversations(previous);
+      setError(err instanceof Error ? err.message : "Could not rename that conversation.");
+    }
   }
 
   async function removeConversation(id: string, label: string) {
@@ -914,30 +944,84 @@ export default function HomePage() {
               {conversations.length ? (
                 conversations.map((item) => (
                   <li key={item.id} className="nia-history-row">
-                    <button
-                      type="button"
-                      onClick={() => void openConversation(item.id)}
-                      className={`nia-history-item ${item.id === conversationId ? "is-active" : ""}`}
-                      title={item.title || item.preview || "Untitled conversation"}
-                    >
-                      <span className="nia-history-dot" />
-                      <span className="nia-history-text nia-sidebar-label">
-                        <strong>{item.title || "Untitled conversation"}</strong>
-                        <small>{item.preview}</small>
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      className="nia-history-delete nia-sidebar-label"
-                      onClick={() =>
-                        void removeConversation(item.id, item.title || "Untitled conversation")
-                      }
-                      disabled={busy}
-                      title="Delete this chat"
-                      aria-label={`Delete ${item.title || "Untitled conversation"}`}
-                    >
-                      <TrashIcon />
-                    </button>
+                    {renamingId === item.id ? (
+                      <input
+                        className="nia-field nia-history-rename"
+                        value={renameDraft}
+                        maxLength={120}
+                        autoFocus
+                        aria-label="Conversation name"
+                        onChange={(event) => setRenameDraft(event.target.value)}
+                        onBlur={() => void commitRename(item.id)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void commitRename(item.id);
+                          }
+                          if (event.key === "Escape") setRenamingId(null);
+                        }}
+                      />
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void openConversation(item.id)}
+                          className={`nia-history-item ${item.id === conversationId ? "is-active" : ""}`}
+                          title={item.title || item.preview || "Untitled conversation"}
+                        >
+                          <span className="nia-history-dot" />
+                          <span className="nia-history-text nia-sidebar-label">
+                            <strong>{item.title || "Untitled conversation"}</strong>
+                            <small>{item.preview}</small>
+                          </span>
+                        </button>
+                        <div className="nia-history-menu nia-sidebar-label">
+                          <button
+                            type="button"
+                            className="nia-history-more"
+                            aria-haspopup="menu"
+                            aria-expanded={menuFor === item.id}
+                            aria-label={`Options for ${item.title || "Untitled conversation"}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setMenuFor(menuFor === item.id ? null : item.id);
+                            }}
+                          >
+                            <MoreIcon />
+                          </button>
+                          {menuFor === item.id ? (
+                            <div className="nia-history-popover" role="menu">
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => {
+                                  setMenuFor(null);
+                                  setRenameDraft(item.title || "");
+                                  setRenamingId(item.id);
+                                }}
+                              >
+                                Rename
+                              </button>
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="is-danger"
+                                disabled={busy}
+                                onClick={() => {
+                                  setMenuFor(null);
+                                  void removeConversation(
+                                    item.id,
+                                    item.title || "Untitled conversation"
+                                  );
+                                }}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+                      </>
+                    )}
                   </li>
                 ))
               ) : (
@@ -1477,6 +1561,7 @@ function ArrowUpIcon() { return <Icon path="M12 19V5M6.5 10.5L12 5l5.5 5.5" clas
 function ArrowDiagonalIcon() { return <Icon path="M8 16L16 8M10 8h6v6" className="h-4 w-4" />; }
 function CopyIcon() { return <Icon path="M9 9h9v9H9zM6 15H5V5h10v1" />; }
 function FlagIcon() { return <Icon path="M6 20V5h11l-2 3.5L17 12H6" className="h-4 w-4" />; }
+function MoreIcon() { return <Icon path="M12 6h0M12 12h0M12 18h0" className="h-4 w-4" />; }
 function TrashIcon() { return <Icon path="M5 7h14M10 7V5h4v2M6 7l1 12h10l1-12M10 11v5M14 11v5" className="h-4 w-4" />; }
 function CheckIcon() { return <Icon path="M5 13l4 4L19 7" />; }
 function SourceIcon() { return <Icon path="M7 7h10v10H7zM10 10h8v8h-8z" className="h-3.5 w-3.5" />; }

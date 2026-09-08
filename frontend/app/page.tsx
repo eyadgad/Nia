@@ -9,6 +9,7 @@ import {
   QueryListResult,
   Session,
   fetchConversation,
+  apiTargetIsUnreachable,
   deleteConversation,
   submitFeedback,
   fetchConversations,
@@ -93,6 +94,13 @@ export default function HomePage() {
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
+    // Resolved in the browser, not at build time: the answer depends on where the page was
+    // served from, and the server rendering it cannot know.
+    if (apiTargetIsUnreachable()) {
+      setApiUnreachable(true);
+      setApiReady(false);
+      return;
+    }
     health()
       .then(() => setApiReady(true))
       .catch(() => setApiReady(false));
@@ -604,6 +612,7 @@ export default function HomePage() {
     }
   }
 
+  const [apiUnreachable, setApiUnreachable] = useState(false);
   const [copied, setCopied] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportName, setReportName] = useState("");
@@ -833,10 +842,17 @@ export default function HomePage() {
               {error ? <p className="nia-form-error">{error}</p> : null}
               <button type="submit" className="nia-primary-button">Enter workspace</button>
             </form>
-            <div className="nia-login-status">
-              <span className={`nia-status-dot ${apiReady ? "is-ready" : "is-offline"}`} />
-              API {apiReady ? "connected" : "offline"}
-            </div>
+            {apiUnreachable ? (
+              <p className="nia-login-notice">
+                This build has no backend configured yet, so sign-in will not work here. It
+                runs against a local stack for now.
+              </p>
+            ) : (
+              <div className="nia-login-status">
+                <span className={`nia-status-dot ${apiReady ? "is-ready" : "is-offline"}`} />
+                API {apiReady ? "connected" : "offline"}
+              </div>
+            )}
           </div>
         </section>
       </main>

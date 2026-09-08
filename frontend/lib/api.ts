@@ -1,6 +1,43 @@
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "http://localhost:8000";
 
+const LOCAL_HOST = /^(localhost|127(?:\.\d+){3}|\[?::1\]?|0\.0\.0\.0)$/i;
+
+/** True when this page would have to reach the visitor's own machine to find the API.
+ *
+ * The fallback base is localhost, which is right when you are running the stack and wrong
+ * everywhere else. Deployed, it makes every visitor's browser knock on their own port 8000:
+ * Chrome and Edge now gate that behind a "wants to access other apps and services on this
+ * device" prompt, so a tester's first impression of a records assistant is a public site
+ * asking for access to their machine -- and whatever answers on that port is not this API.
+ * Better to say the build has no backend than to go looking for one on their computer.
+ */
+export function apiTargetIsUnreachable(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const target = new URL(API_BASE, window.location.href);
+    return LOCAL_HOST.test(target.hostname) && !LOCAL_HOST.test(window.location.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export class ApiUnconfiguredError extends Error {
+  constructor() {
+    super(
+      "This build has no backend configured, so there is nothing to sign in to yet. " +
+        "Set NEXT_PUBLIC_API_BASE_URL and redeploy."
+    );
+    this.name = "ApiUnconfiguredError";
+  }
+}
+
+function assertApiReachable(): void {
+  // Thrown before fetch rather than after it fails: the point is that the request is never
+  // made, so the browser never asks the visitor for local network access.
+  if (apiTargetIsUnreachable()) throw new ApiUnconfiguredError();
+}
+
 export type Session = {
   principal_id: string;
   allowed_file_ids: number[];
@@ -46,6 +83,7 @@ export class AuthExpiredError extends Error {
 }
 
 async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  assertApiReachable();
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     credentials: "include",
@@ -57,6 +95,7 @@ async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Re
 }
 
 export async function login(username: string, password: string): Promise<Session> {
+  assertApiReachable();
   const response = await fetch(`${API_BASE}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -70,6 +109,7 @@ export async function login(username: string, password: string): Promise<Session
 }
 
 export async function fetchSession(): Promise<Session | null> {
+  assertApiReachable();
   const response = await fetch(`${API_BASE}/api/auth/session`, { credentials: "include" });
   if (response.status === 204) {
     return null;
@@ -81,6 +121,7 @@ export async function fetchSession(): Promise<Session | null> {
 }
 
 export async function logout(): Promise<void> {
+  assertApiReachable();
   await fetch(`${API_BASE}/api/auth/logout`, {
     method: "POST",
     credentials: "include",
@@ -135,6 +176,7 @@ export async function fetchLivekitToken(
 }
 
 export async function health(): Promise<{ status: string }> {
+  assertApiReachable();
   const response = await fetch(`${API_BASE}/health`);
   if (!response.ok) {
     throw new Error("API unavailable");

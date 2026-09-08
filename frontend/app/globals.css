@@ -920,6 +920,16 @@ button:disabled { cursor: default; }
 }
 .nia-primary-button:hover { opacity: .92; }
 .nia-form-error { margin: -3px 0 0; color: var(--danger); font-size: 12px; }
+.nia-login-notice {
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #f6f1e4;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 19px;
+}
 .nia-login-status { margin-top: 22px; display: flex; align-items: center; gap: 7px; color: var(--subtle); font-size: 11px; }
 
 /* citation modal */

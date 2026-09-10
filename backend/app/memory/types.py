@@ -63,6 +63,9 @@ class QueryFrame(BaseModel):
     result_set_id: str | None = None
     last_source_ids: list[str] = Field(default_factory=list)
     action_id: str | None = None
+    # The words that produced this result. A researcher who pastes back what the answer
+    # should have been is correcting this question, and it is asked again against the list.
+    question: str | None = Field(default=None, max_length=4000)
 
 
 class ConversationRecord(BaseModel):

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
+
 from app.execution.executor import ActionResult, ExecutionResult
+from app.execution.name_correction import is_name_field
+from app.execution.roster import Roster, roster_sentence
 from app.execution.row_projection import display_value, field_descriptors, semantic_value
 from app.planning.catalog import FieldCatalog
 from app.planning.plan_schema import FilterOperator, Predicate, QueryPlan
@@ -102,14 +106,36 @@ def format_deterministic_answer(
     plan: QueryPlan,
     result: ExecutionResult,
     catalog: FieldCatalog,
+    *,
+    roster: Roster | None = None,
 ) -> str:
     if result.action_results:
+        merged = _format_count_with_distribution(
+            result.action_results, plan, catalog, roster=roster
+        )
+        if merged is not None:
+            return merged
         verbose = len(result.action_results) == 1
         parts = [
-            _format_action(action, plan, catalog, verbose=verbose)
-            for action in result.action_results
+            part
+            for part in (
+                _format_action(action, plan, catalog, verbose=verbose)
+                for action in result.action_results
+            )
+            if part
         ]
-        return " ".join(part for part in parts if part)
+        if (
+            roster is not None
+            and parts
+            and len(result.action_results) == 1
+            and is_plain_count(result.action_results[0])
+        ):
+            sentence = roster_sentence(roster)
+            if sentence:
+                parts[0] = f"{parts[0]} {sentence}"
+        # A table or a numbered list only renders as one when it starts on a line of its own.
+        joiner = "\n\n" if any("\n" in part for part in parts) else " "
+        return joiner.join(parts)
 
     labels = _scope_text(plan, catalog)
     if result.distinct_field:
@@ -117,6 +143,64 @@ def format_deterministic_answer(
     if result.grouped_counts:
         return _format_grouped(result.grouped_counts, catalog)
     return "No matching authorized records were found."
+
+
+def _format_count_with_distribution(
+    actions: list[ActionResult],
+    plan: QueryPlan,
+    catalog: FieldCatalog,
+    *,
+    roster: Roster | None = None,
+) -> str | None:
+    """One answer for "how many are there, and how are they spread across X".
+
+    The planner asks that as two actions over the same records -- a count and a breakdown --
+    and they were printed one after the other: "Students: 2781 students. By community in the
+    Student master list:" followed by every one of 370 labels. The count is the breakdown's
+    own total, so it is said once, at the head of a summary a researcher can read.
+    """
+    if len(actions) != 2:
+        return None
+    counts = [item for item in actions if is_plain_count(item)]
+    spreads = [
+        item
+        for item in actions
+        if item.ranked_groups
+        and not item.group_fields[1]
+        and item.requested_top_n is None
+        and item.stats is None
+    ]
+    if len(counts) != 1 or len(spreads) != 1:
+        return None
+    count, spread = counts[0], spreads[0]
+    file_ids = tuple(count.file_ids or plan.scope.file_ids)
+    if tuple(spread.file_ids or plan.scope.file_ids) != file_ids:
+        return None
+    if [item.payload() for item in count.predicates] != [
+        item.payload() for item in spread.predicates
+    ]:
+        return None
+    total = int(next(fact.value for fact in count.facts if fact.name == "count"))
+    return _format_ranked(
+        spread,
+        _scope_text(plan, catalog, file_ids),
+        catalog=catalog,
+        file_ids=file_ids,
+        total=total,
+        constraint=_constraint_text(count.predicates, catalog, file_ids),
+        roster=roster,
+    )
+
+
+def is_plain_count(action: ActionResult) -> bool:
+    return (
+        any(fact.name == "count" for fact in action.facts)
+        and not action.ranked_groups
+        and not action.rows
+        and not action.value_counts
+        and not action.distinct_values
+        and action.percentage is None
+    )
 
 
 def _format_action(
@@ -128,7 +212,7 @@ def _format_action(
 ) -> str:
     file_ids = action.file_ids or plan.scope.file_ids
     labels = _scope_text(plan, catalog, file_ids)
-    constraint = _constraint_text(action.predicates)
+    constraint = _constraint_text(action.predicates, catalog, file_ids)
     # Computed answers are rendered before any row page, so a calculation is never
     # reported as "showing 1-25 of N".
     if action.percentage is not None:
@@ -142,13 +226,21 @@ def _format_action(
     if action.interval_summary is not None or action.intervals:
         return _format_intervals(action, labels)
     if action.ranked_groups and action.goal == "rank":
-        return _format_ranked(action, labels)
+        return _format_ranked(
+            action, labels, catalog=catalog, file_ids=file_ids, constraint=constraint
+        )
     if (
         action.value_counts
         and action.grouped_field
         and any(fact.name == "count" for fact in action.facts)
     ):
-        return _format_value_counts(action.grouped_field, action.value_counts, labels)
+        return _format_value_counts(
+            action.grouped_field,
+            action.value_counts,
+            labels,
+            catalog=catalog,
+            file_ids=file_ids,
+        )
     # A GROUP_BY that carries the values themselves was asked to show them. It also
     # publishes count_distinct so a caller can read the number, but that fact is not a
     # signal to replace the list with a tally -- COUNT_DISTINCT carries no values and
@@ -309,40 +401,193 @@ def _format_numeric_aggregates(
     return f"In the {scope_text}{subject}: " + "; ".join(parts) + "."
 
 
-def _format_ranked(action: ActionResult, scope_text: str) -> str:
+# A distribution this short is shown whole. A longer one leads with its most common values,
+# which is what a researcher reads first, and says how many more there are.
+_DISTRIBUTION_FULL_MAX = 30
+_DISTRIBUTION_TOP = 15
+
+
+def _format_ranked(
+    action: ActionResult,
+    scope_text: str,
+    *,
+    catalog: FieldCatalog | None = None,
+    file_ids: tuple[int, ...] = (),
+    total: int | None = None,
+    constraint: str = "",
+    roster: Roster | None = None,
+) -> str:
     groups = action.ranked_groups
     primary, secondary = action.group_fields
-    label = _humanize(primary)
+    label = _field_label(primary, file_ids, catalog)
     if not groups:
         return f"No {label} values are recorded in the {scope_text}."
     requested = action.requested_top_n
     shown = groups if requested is None else groups[:requested]
-    lines = []
-    for item in shown:
-        name = item.label or "Not recorded"
-        if secondary and item.secondary_label:
-            name = f"{name} — {item.secondary_label}"
-        lines.append(f"{name}: {item.count:,}")
     head = shown[0]
-    total = sum(item.count for item in groups)
     if len(shown) == 1:
+        everything = sum(item.count for item in groups)
         return (
             f"{head.label or 'Not recorded'} has the most, with {head.count:,} "
-            f"of {total:,} records in the {scope_text}."
+            f"of {everything:,} records in the {scope_text}."
         )
-    heading = (
-        f"Top {len(shown)} by {label}"
-        if requested is not None and len(groups) > len(shown)
-        else f"By {label}"
+    noun = _record_noun(file_ids)
+    suffix = (
+        f" (showing {len(shown)} of {len(groups)} groups)" if len(groups) > len(shown) else ""
     )
     if secondary:
-        heading += f" and {_humanize(secondary)}"
-    suffix = (
-        f" (showing {len(shown)} of {len(groups)} groups)"
-        if len(groups) > len(shown)
-        else ""
+        second = _field_label(secondary, file_ids, catalog)
+        pairs = [
+            (str(item.label or "Not recorded"), str(item.secondary_label or "Not recorded"), item.count)
+            for item in shown
+        ]
+        return f"By {label} and {second} in the {scope_text}{suffix}:\n\n" + _markdown_table(
+            [label, second, _count_heading(noun)], pairs
+        )
+    if requested is None:
+        counted = roster if roster is not None and roster.differs else None
+        return _distribution_summary(
+            [(item.label, item.count) for item in groups],
+            field_label=label,
+            scope_text=scope_text,
+            noun=noun,
+            total=total,
+            constraint=constraint,
+            roster=counted,
+            people_recorded=(
+                counted.recorded_for(primary, catalog)
+                if counted is not None and catalog is not None and primary
+                else None
+            ),
+        )
+    heading = f"Top {len(shown)} by {label}" if len(groups) > len(shown) else f"By {label}"
+    rows = [(str(item.label or "Not recorded"), item.count) for item in shown]
+    return f"{heading} in the {scope_text}{suffix}:\n\n" + _markdown_table(
+        [label, _count_heading(noun)], rows
     )
-    return f"{heading} in the {scope_text}{suffix}:\n" + "\n".join(lines)
+
+
+def _distribution_summary(
+    pairs: list[tuple[str | None, int]],
+    *,
+    field_label: str,
+    scope_text: str,
+    noun: str,
+    total: int | None,
+    constraint: str = "",
+    roster: Roster | None = None,
+    people_recorded: int | None = None,
+) -> str:
+    """How many records there are, how many carry the field, and the values it holds.
+
+    Totals come first because they are what a researcher checks an answer against: the rows
+    in the list, how many have the field filled in and how many are blank, and how many
+    different values it takes. Then the values themselves, most common first, as a table.
+    """
+    recorded = sorted(
+        (
+            (str(label), count)
+            for label, count in pairs
+            if label not in (None, "", "Not recorded")
+        ),
+        key=lambda item: (-item[1], item[0].casefold()),
+    )
+    blank = [count for label, count in pairs if label in (None, "", "Not recorded")]
+    recorded_total = sum(count for _label, count in recorded)
+    if blank:
+        missing: int | None = sum(blank)
+    elif total is not None:
+        missing = max(total - recorded_total, 0)
+    else:
+        missing = None
+    sentences: list[str] = []
+    if total is not None:
+        subject = f" {constraint}" if constraint else ""
+        sentences.append(
+            f"There {'is' if total == 1 else 'are'} **{_records_phrase(total, noun)}** "
+            f"in the {scope_text}{subject}."
+        )
+    if roster is not None:
+        sentences.append(roster_sentence(roster))
+    usage = (
+        f"Using the **{field_label}** field, **{recorded_total:,} "
+        f"{'has' if recorded_total == 1 else 'have'} a value recorded**"
+    )
+    if missing is not None:
+        usage += f" and **{missing:,} {'is' if missing == 1 else 'are'} blank**"
+    sentences.append(usage + ".")
+    if roster is not None and people_recorded is not None:
+        sentences.append(
+            f"Counting each person once, **{people_recorded:,} of the {roster.unique:,}** "
+            f"have a value recorded and **{roster.unique - people_recorded:,}** do not."
+        )
+    distinct = len(recorded)
+    if not distinct:
+        return " ".join(sentences)
+    sentences.append(
+        f"There {'is' if distinct == 1 else 'are'} **{distinct:,} distinct "
+        f"value{'' if distinct == 1 else 's'}**."
+    )
+    shown = recorded if distinct <= _DISTRIBUTION_FULL_MAX else recorded[:_DISTRIBUTION_TOP]
+    rows: list[tuple[str, int]] = list(shown)
+    if blank:
+        rows.append(("Not recorded", sum(blank)))
+    lead = "The most common:" if len(shown) < distinct else "All of them:"
+    text = (
+        " ".join(sentences)
+        + f" {lead}\n\n"
+        + _markdown_table([field_label, _count_heading(noun)], rows)
+    )
+    if len(shown) < distinct:
+        text += (
+            f"\n\n…and {distinct - len(shown):,} more. Ask for every {field_label} value "
+            "to see them all."
+        )
+    return text
+
+
+def _markdown_table(header: list[str], rows: list[tuple[Any, ...]]) -> str:
+    """A table whose last column is a count, right-aligned."""
+    rule = ["---"] * (len(header) - 1) + ["---:"]
+    lines = [
+        "| " + " | ".join(_table_cell(item) for item in header) + " |",
+        "| " + " | ".join(rule) + " |",
+    ]
+    lines.extend("| " + " | ".join(_table_cell(item) for item in row) + " |" for row in rows)
+    return "\n".join(lines)
+
+
+def _table_cell(value: Any) -> str:
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, int):
+        return f"{value:,}"
+    text = " ".join(str(value if value is not None else "Not recorded").split())
+    return text.replace("|", "\\|")
+
+
+def _record_noun(file_ids: tuple[int, ...]) -> str:
+    return "student" if tuple(file_ids) == (49,) else "record"
+
+
+def _records_phrase(count: int, noun: str) -> str:
+    plural = "record" if count == 1 else "records"
+    return f"{count:,} {plural}" if noun == "record" else f"{count:,} {noun} {plural}"
+
+
+def _count_heading(noun: str) -> str:
+    return "Students" if noun == "student" else "Records"
+
+
+def _field_label(
+    field_name: str | None, file_ids: tuple[int, ...], catalog: FieldCatalog | None
+) -> str:
+    if catalog is not None and field_name:
+        for file_id in file_ids:
+            spec = catalog.resolve_field(file_id, field_name)
+            if spec is not None:
+                return spec.human_label
+    return _humanize(field_name)
 
 
 def _format_stats(action: ActionResult, scope_text: str) -> str:
@@ -488,22 +733,20 @@ def _format_distinct_count(field: str, count: int, scope_text: str) -> str:
     return f"There {'is' if count == 1 else 'are'} {count} {noun} in the {scope_text}."
 
 
-def _format_value_counts(field: str, counts: dict[str, int], scope_text: str) -> str:
-    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0].casefold()))
-    total = sum(count for _label, count in ordered)
-    missing = sum(count for label, count in ordered if label == "Not recorded")
-    recorded = total - missing
-    visible = [(label, count) for label, count in ordered if label != "Not recorded"]
-    shown = visible[:10]
-    details = "; ".join(f"{label}: {count}" for label, count in shown)
-    remainder = len(visible) - len(shown)
-    if remainder:
-        details += f"; plus {remainder} other recorded values"
-    label = field.replace("_", " ").capitalize()
-    missing_text = f"; {missing} not recorded" if missing else ""
-    return (
-        f"{label} summary for the {scope_text}: {total} records; "
-        f"{recorded} with a recorded value{missing_text}. Most frequent: {details}."
+def _format_value_counts(
+    field: str,
+    counts: dict[str, int],
+    scope_text: str,
+    *,
+    catalog: FieldCatalog | None = None,
+    file_ids: tuple[int, ...] = (),
+) -> str:
+    return _distribution_summary(
+        list(counts.items()),
+        field_label=_field_label(field, file_ids, catalog),
+        scope_text=scope_text,
+        noun=_record_noun(file_ids),
+        total=sum(counts.values()),
     )
 
 
@@ -560,9 +803,31 @@ def format_unplanned(detail: str) -> str:
     )
 
 
-def _constraint_text(predicates: list[Predicate]) -> str:
+_TEXT_MATCH = frozenset(
+    {FilterOperator.CONTAINS, FilterOperator.CONTAINS_ANY, FilterOperator.FULL_TEXT_SEARCH}
+)
+_TEXT_EXCLUDE = frozenset({FilterOperator.NOT_CONTAINS, FilterOperator.NOT_CONTAINS_ANY})
+
+
+def _constraint_text(
+    predicates: list[Predicate],
+    catalog: FieldCatalog | None = None,
+    file_ids: tuple[int, ...] = (),
+) -> str:
+    """The conditions an answer was computed under, in words.
+
+    A count that leaves out what it counted is unverifiable. "There are 0 students in the
+    Student master list" was the whole answer to a question about transfers, and nothing in
+    it said the zero came from searching Notes for a word that is written elsewhere. Naming
+    the field and the words lets the researcher see a wrong search for what it is.
+    """
     parts: list[str] = []
     for predicate in predicates:
+        if predicate.is_group():
+            mention = _group_mention(predicate, catalog, file_ids)
+            if mention:
+                parts.append(mention)
+            continue
         if predicate.operator is FilterOperator.STARTS_WITH:
             parts.append(f"whose names start with {predicate.value}")
         elif predicate.operator is FilterOperator.EQUALS and predicate.field == "community":
@@ -575,4 +840,70 @@ def _constraint_text(predicates: list[Predicate]) -> str:
             parts.append(f"with {predicate.field.replace('_', ' ')} before {predicate.value}")
         elif predicate.operator is FilterOperator.AFTER:
             parts.append(f"with {predicate.field.replace('_', ' ')} after {predicate.value}")
+        elif catalog is None or is_name_field(predicate.field, file_ids, catalog):
+            # A searched name is shown in the rows it found; repeating it adds nothing.
+            continue
+        elif predicate.operator in _TEXT_MATCH:
+            parts.append(
+                f"with {_quoted_terms(predicate.value)} in "
+                f"{_sentence_label(_field_label(predicate.field, file_ids, catalog))}"
+            )
+        elif predicate.operator in _TEXT_EXCLUDE:
+            parts.append(
+                f"without {_quoted_terms(predicate.value)} in "
+                f"{_sentence_label(_field_label(predicate.field, file_ids, catalog))}"
+            )
+        elif predicate.operator is FilterOperator.IS_KNOWN:
+            parts.append(
+                f"with a recorded {_sentence_label(_field_label(predicate.field, file_ids, catalog))}"
+            )
+        elif predicate.operator is FilterOperator.IS_UNKNOWN:
+            parts.append(
+                f"with no recorded {_sentence_label(_field_label(predicate.field, file_ids, catalog))}"
+            )
     return " ".join(parts)
+
+
+def _group_mention(
+    predicate: Predicate, catalog: FieldCatalog | None, file_ids: tuple[int, ...]
+) -> str:
+    """'with "..." in additional information or death details' for a widened search."""
+    if catalog is None or predicate.op != "or":
+        return ""
+    leaves = predicate.leaves()
+    if not leaves or any(
+        leaf.operator not in _TEXT_MATCH or is_name_field(leaf.field, file_ids, catalog)
+        for leaf in leaves
+    ):
+        return ""
+    labels = list(
+        dict.fromkeys(
+            _sentence_label(_field_label(leaf.field, file_ids, catalog)) for leaf in leaves
+        )
+    )
+    terms: list[str] = []
+    for leaf in leaves:
+        for term in _terms_of(leaf.value):
+            if term.casefold() not in {item.casefold() for item in terms}:
+                terms.append(term)
+    return f"with {_quoted_terms(terms)} in {' or '.join(labels)}"
+
+
+def _sentence_label(label: str) -> str:
+    """A label as it reads mid-sentence: "Additional information" -> "additional information".
+
+    Only a label with no other capitals is lowered, so "First Nation / Community" keeps its
+    proper nouns.
+    """
+    if len(label) > 1 and label[0].isupper() and not any(ch.isupper() for ch in label[1:]):
+        return label[0].lower() + label[1:]
+    return label
+
+
+def _terms_of(value: Any) -> list[str]:
+    items = value if isinstance(value, list | tuple) else [value]
+    return [" ".join(str(item).split()) for item in items if str(item or "").strip()]
+
+
+def _quoted_terms(value: Any) -> str:
+    return " or ".join(f'"{term}"' for term in _terms_of(value))

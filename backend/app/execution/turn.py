@@ -18,15 +18,19 @@ from app.execution.formatter import (
     format_deterministic_answer,
     format_spoken_answer,
     format_unplanned,
+    is_plain_count,
 )
 from app.execution.name_correction import (
     ask_text,
     corrected_prefix,
     from_rows,
+    is_name_field,
     rewrite_for,
     searched_name,
 )
+from app.execution.roster import Roster, fetch_rows, roster_from_rows
 from app.execution.row_projection import field_descriptors, public_projected_row
+from app.execution.text_search import TextSearchRefinement, refine_text_search
 from app.llm.base import ReasoningProvider
 from app.llm.citations import validate_synthesis
 from app.llm.factory import reasoning_unavailable_reason
@@ -134,6 +138,10 @@ class AssistantTurnService:
         # HTTP builds a service per request; the voice agent reuses one. Set and
         # cleared per turn, same as _latency_bag, so a GUI model pick cannot leak.
         self._turn_reasoner: ReasoningProvider | None = None
+        # Set when a pasted correction re-asks an earlier question: the conversation still
+        # records what the researcher typed, and the answer says what was checked.
+        self._turn_user_text: str | None = None
+        self._turn_preface: str | None = None
 
     async def answer(
         self,
@@ -176,6 +184,8 @@ class AssistantTurnService:
         finally:
             self._latency_bag = None
             self._turn_reasoner = None
+            self._turn_user_text = None
+            self._turn_preface = None
         bag["e2e_ms"] = (time.perf_counter() - started) * 1000
         bag["ttft_ms"] = (
             (first_token_at[0] - started) * 1000 if first_token_at else None
@@ -580,6 +590,17 @@ class AssistantTurnService:
                 suggested_file_id=selected,
                 review_status="skipped",
             )
+
+        earlier = _question_being_corrected(conversation, selected, question)
+        if earlier is not None:
+            # The paste is a correction of an earlier answer, not a question: ask that one
+            # again, so NIA's figures can be set beside the researcher's.
+            self._turn_user_text = question
+            self._turn_preface = (
+                "Thank you for checking. I asked your earlier question again against the "
+                f"list (“{_shorten(earlier, 200)}”), so the two can be compared:"
+            )
+            question = earlier
 
         authorized_catalog = full_catalog.for_scope(scope)
         scope = scope.narrow((selected,))
@@ -1021,7 +1042,7 @@ class AssistantTurnService:
             return None
         if _found_any(result):
             return None
-        searched_for = searched_name(plan, catalog)
+        searched_for = searched_name(plan, catalog, question)
         if not searched_for:
             return None
         suggest = getattr(self._gateway, "suggest_name_matches", None)
@@ -1088,7 +1109,7 @@ class AssistantTurnService:
         rerun = await self._run_plan(
             scope,
             question,
-            rewrite_for(plan, catalog, certain.display_name),
+            rewrite_for(plan, catalog, certain.display_name, searched_for=searched_for),
             conversation,
             mode=mode,
             cancel=cancel,
@@ -1135,6 +1156,10 @@ class AssistantTurnService:
                 conversation_id=conversation.id,
             )
 
+        refinement = await self._refine_text_search(scope, plan, catalog, question)
+        if refinement is not None:
+            plan = refinement.plan
+
         await _emit_progress(
             on_progress,
             "plan_validated",
@@ -1176,7 +1201,12 @@ class AssistantTurnService:
             from app.planning.response_policy import acknowledgement
 
             ack = acknowledgement(route.turn_plan)
-        answer = format_deterministic_answer(question, plan, execution, catalog)
+        roster = await self._roster_for(scope, plan, execution, catalog)
+        answer = format_deterministic_answer(question, plan, execution, catalog, roster=roster)
+        if refinement is not None:
+            answer = refinement.compose(answer)
+        if self._turn_preface:
+            answer = f"{self._turn_preface}\n\n{answer}"
         if route is not None and route.turn_plan is not None and route.turn_plan.verify_actions():
             answer = _verify_preface(conversation, execution) + answer
         if ack:
@@ -1250,6 +1280,71 @@ class AssistantTurnService:
             source_actions=self._source_actions(route, scope, catalog, conversation),
         )
         return result
+
+    async def _refine_text_search(
+        self,
+        scope: AccessScope,
+        plan: QueryPlan,
+        catalog: FieldCatalog,
+        question: str,
+    ) -> TextSearchRefinement | None:
+        """Check a plan's narrative word matches against the records; None leaves it as asked.
+
+        Additive in the same way as name correction: any failure here -- a gateway error, a
+        rewritten plan the validator refuses -- runs the planner's plan unchanged rather than
+        failing a turn that would otherwise have been answered.
+        """
+        if not get_settings().text_search_refinement:
+            return None
+        try:
+            refinement = await refine_text_search(self._gateway, scope, plan, catalog, question)
+            if refinement is None:
+                return None
+            refinement.plan = validate_query_plan(refinement.plan, scope, catalog)
+            return refinement
+        except Exception:
+            logger.warning("text search refinement skipped; running the plan as asked", exc_info=True)
+            return None
+
+    async def _roster_for(
+        self,
+        scope: AccessScope,
+        plan: QueryPlan,
+        execution: ExecutionResult,
+        catalog: FieldCatalog,
+    ) -> Roster | None:
+        """The people behind a count on a short list, so rows and people can be told apart.
+
+        Only for a plain count -- alone, or beside a breakdown of the same records -- that is
+        not about a named person, and only when the list is short enough to read. Anything
+        else, or any failure reading the rows, leaves the count exactly as it was.
+        """
+        limit = get_settings().roster_max_rows
+        actions = execution.action_results
+        if not limit or not actions or len(actions) > 2:
+            return None
+        counts = [item for item in actions if is_plain_count(item)]
+        if len(counts) != 1:
+            return None
+        count = counts[0]
+        file_ids = tuple(count.file_ids or plan.scope.file_ids)
+        total = int(next((fact.value for fact in count.facts if fact.name == "count"), 0) or 0)
+        if total <= 0 or total > limit:
+            return None
+        if not any(catalog.resolve_field(file_id, "student_name") for file_id in file_ids):
+            return None
+        if any(
+            is_name_field(leaf.field, file_ids, catalog)
+            for predicate in count.predicates
+            for leaf in predicate.leaves()
+        ):
+            return None
+        try:
+            rows = await fetch_rows(self._gateway, scope, file_ids, list(count.predicates), total)
+        except Exception:
+            logger.warning("roster skipped; answering with the row count alone", exc_info=True)
+            return None
+        return roster_from_rows(rows, catalog)
 
     def _semantic_compiler(self) -> SemanticCompiler | UnavailableSemanticCompiler:
         """Always return a compiler layer. Missing xAI is an explicit unavailable result."""
@@ -1697,6 +1792,8 @@ class AssistantTurnService:
         citations: list[str] | None = None,
         source_actions: dict[str, object] | None = None,
     ) -> None:
+        if self._turn_user_text is not None:
+            question = self._turn_user_text
         update_memory_from_turn(
             conversation,
             question=question,
@@ -2615,6 +2712,34 @@ def _packet_for_synthesis(
         )
     hits = list(execution.hits) or [hit_from_row(row) for row in execution.rows if row.get("source_row_id")]
     return build_evidence_packet(question, hits, facts=list(facts), catalog=catalog)
+
+
+def _question_being_corrected(
+    conversation: ConversationRecord, selected_file_id: int | None, text: str
+) -> str | None:
+    """The earlier question a pasted correction is about, or None when it is not one."""
+    from app.planning.corrections import is_pasted_correction
+
+    if not is_pasted_correction(text):
+        return None
+    frame = conversation.active_frame()
+    if frame is not None and frame.question:
+        if selected_file_id is None or tuple(frame.query.file_ids) == (selected_file_id,):
+            return frame.question
+    # Conversations saved before frames kept their question: the last thing the researcher
+    # asked that was not itself a pasted correction.
+    for item in reversed(conversation.recent_turns):
+        if item.get("role") != "user":
+            continue
+        candidate = " ".join(str(item.get("text") or "").split())
+        if candidate and not is_pasted_correction(str(item.get("text") or "")):
+            return candidate
+    return None
+
+
+def _shorten(text: str, limit: int) -> str:
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
 def _found_any(result: TurnResult) -> bool:

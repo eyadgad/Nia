@@ -135,6 +135,13 @@ class Settings(BaseSettings):
     name_correction: bool = True
     name_correction_max_distance: int = Field(default=2, ge=1, le=4)
     name_correction_limit: int = Field(default=6, ge=1, le=25)
+    # A word match on narrative text is checked against the records before it runs: moved to
+    # the narrative field that actually holds the words when the chosen one has none, and
+    # narrowed to the direction the question gives a word ("transferred to", not "from").
+    text_search_refinement: bool = True
+    # Counting people rather than rows reads every matching row, so it is limited to lists
+    # small enough for that to be cheap -- which are also the ones with blank and note rows.
+    roster_max_rows: int = Field(default=1000, ge=0)
     model_temperature: float = 0.0
     model_seed: int | None = None
     readiness_timeout_ms: int = 1500

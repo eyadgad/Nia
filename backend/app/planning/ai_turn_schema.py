@@ -38,6 +38,22 @@ def _require_discriminator_in_schema(schema: dict[str, Any]) -> None:
             schema["required"] = required
 
 
+def clip_free_text(value: Any, limit: int) -> Any:
+    """Shorten a free-text field the model overfilled instead of rejecting the whole turn.
+
+    The planner restates the request in its own words, and handed a long paste -- a tester's
+    table of corrected figures -- it restated all of it. The length limit then failed the
+    turn at validation, twice, and the researcher read "couldn't produce a usable plan". These
+    fields describe the turn; nothing is computed from their full text, so a restatement cut at
+    a sentence boundary serves exactly as well as the whole one.
+    """
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+    cut = value[:limit]
+    stop = max(cut.rfind(". "), cut.rfind("\n"))
+    return (cut[: stop + 1] if stop >= limit // 2 else cut).rstrip()
+
+
 class AIPlannerModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid", json_schema_extra=_require_discriminator_in_schema
@@ -119,6 +135,11 @@ class PlannedConversationAction(AIPlannerModel):
         "dataset_not_selected",
     ]
     response: str = Field(default="", max_length=1000)
+
+    @field_validator("response", mode="before")
+    @classmethod
+    def _clip_response(cls, value: Any) -> Any:
+        return clip_free_text(value, 1000)
 
     @model_validator(mode="after")
     def _response_required(self) -> PlannedConversationAction:
@@ -358,6 +379,11 @@ class PlannedTurn(AIPlannerModel):
     needs_inference: bool = False
     unresolved: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0, le=1)
+
+    @field_validator("normalized_request", mode="before")
+    @classmethod
+    def _clip_normalized_request(cls, value: Any) -> Any:
+        return clip_free_text(value, 1000)
 
     @model_validator(mode="before")
     @classmethod

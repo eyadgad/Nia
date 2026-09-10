@@ -48,7 +48,13 @@ def update_memory_from_turn(
         conversation.title = question[:80]
 
     if execution is not None and execution.action_results and plan is not None:
-        keys = _persist_action_frames(conversation, plan, execution, source_actions=source_actions)
+        keys = _persist_action_frames(
+            conversation,
+            plan,
+            execution,
+            source_actions=source_actions,
+            question=_frame_question(question),
+        )
         if keys:
             conversation.last_action_keys = keys
             conversation.rolling_summary = _summary(conversation)
@@ -60,7 +66,13 @@ def update_memory_from_turn(
         return conversation
 
     key = frame_key or frame_key_for(state.file_ids)
-    _write_frame(conversation, key=key, state=state, rows=_rows(execution))
+    _write_frame(
+        conversation,
+        key=key,
+        state=state,
+        rows=_rows(execution),
+        question=_frame_question(question),
+    )
     conversation.active_frame_key = key
     conversation.last_action_keys = [key]
     conversation.rolling_summary = _summary(conversation)
@@ -168,6 +180,7 @@ def _persist_action_frames(
     execution: ExecutionResult,
     *,
     source_actions: dict[str, object] | None = None,
+    question: str | None = None,
 ) -> list[str]:
     from app.planning.query_plan_builder import reconstruct_query_action
     from app.planning.turn_schema import QueryAction
@@ -194,7 +207,14 @@ def _persist_action_frames(
         state = extract_action_query_state(plan, action, source_action=source)
         base = frame_key_for(state.file_ids)
         key = f"{base}-{action.action_id}" if multi else base
-        frame = _write_frame(conversation, key=key, state=state, rows=action.rows, result=action)
+        frame = _write_frame(
+            conversation,
+            key=key,
+            state=state,
+            rows=action.rows,
+            result=action,
+            question=question,
+        )
         keys.append(key)
         last_key = base
         last_frame = frame
@@ -213,7 +233,9 @@ def _write_frame(
     state: QueryState,
     rows: list[dict],
     result=None,
+    question: str | None = None,
 ) -> QueryFrame:
+    previous = conversation.frames.get(key)
     source_ids = _source_ids_from_rows(rows)
     result_set_id = None
     if source_ids or (result is not None and getattr(result, "total_count", None) is not None):
@@ -246,9 +268,21 @@ def _write_frame(
         result_set_id=result_set_id,
         last_source_ids=source_ids,
         action_id=state.action_id,
+        # A turn with no question of its own -- a pasted correction re-asking an earlier
+        # one -- keeps the question the frame already answers.
+        question=question if question is not None else (previous.question if previous else None),
     )
     conversation.frames[key] = frame
     return frame
+
+
+def _frame_question(question: str) -> str | None:
+    from app.planning.corrections import is_pasted_correction
+
+    text = " ".join((question or "").split())
+    if not text or is_pasted_correction(question):
+        return None
+    return text[:4000]
 
 
 def _rows(execution: ExecutionResult | None) -> list[dict]:

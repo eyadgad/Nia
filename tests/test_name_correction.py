@@ -184,6 +184,39 @@ def test_conditions_other_than_the_name_survive_the_rewrite():
     assert ("community", "Walpole Island") in kept
 
 
+def _search_plan(query: str) -> QueryPlan:
+    return QueryPlan(
+        scope=PlanScope(file_ids=(49,)),
+        goals=("lookup",),
+        steps=[
+            PlanStep(id="rows", op=PlanOp.USE_CURRENT_VERSION),
+            PlanStep(id="search", op=PlanOp.FULL_TEXT_SEARCH, input="rows", query=query),
+        ],
+    )
+
+
+def test_a_name_searched_as_free_text_is_still_recognised():
+    """The planner may search a name instead of filtering on it; the typo is the same."""
+    plan = _search_plan("Albert Penence")
+    assert searched_name(plan, static_catalog(), "Show the community for Albert Penence") == (
+        "Albert Penence"
+    )
+
+
+def test_a_topic_searched_as_free_text_is_not_taken_for_a_name():
+    """Only words written capitalised in the question read as a name."""
+    plan = _search_plan("transferred")
+    assert searched_name(plan, static_catalog(), "How many were transferred to schools?") == ""
+
+
+def test_the_corrected_search_asks_for_the_corrected_name():
+    plan = _search_plan("Albert Penence")
+    rewritten = rewrite_for(
+        plan, static_catalog(), "Albert Penance", searched_for="Albert Penence"
+    )
+    assert rewritten.steps[1].query == "Albert Penance"
+
+
 # ---------------------------------------------------------------- against the gateway
 
 

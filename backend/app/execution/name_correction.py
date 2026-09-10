@@ -19,15 +19,17 @@ names the records actually carry, which is arithmetic over the index the backfil
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from app.planning.catalog import FieldCatalog
-from app.planning.plan_schema import FilterOperator, Predicate, QueryPlan
+from app.planning.plan_schema import FilterOperator, PlanOp, Predicate, QueryPlan
 
 # Paths whose values are a person's name in some recorded form. A filter on any of them is
 # a filter on who the record is about, which is what can be misspelt.
 _NAME_PATHS = ("names", "canonical.display_name", "canonical.name_parts.")
+_FREE_TEXT_OPS = frozenset({PlanOp.FULL_TEXT_SEARCH, PlanOp.FUZZY_SEARCH, PlanOp.EXACT_LOOKUP})
 
 
 @dataclass(frozen=True)
@@ -65,12 +67,41 @@ def is_name_field(field_name: str, file_ids: tuple[int, ...], catalog: FieldCata
     return False
 
 
-def searched_name(plan: QueryPlan, catalog: FieldCatalog) -> str:
+def searched_name(plan: QueryPlan, catalog: FieldCatalog, question: str = "") -> str:
     """The name the plan looked for, reassembled from its filters.
 
     A multi-word name reaches the plan as one filter per token -- that is how a token index
     is matched -- so the words are joined back in plan order to recover what was typed.
+
+    The planner can also search a name as free text instead of filtering a name field. That
+    shape found nothing for a misspelt name and was never corrected, because no name filter
+    was there to read. A free-text query is taken as a name only when every word of it is
+    written capitalised in the question -- how a person writes a name, and not how anyone
+    writes "transferred" -- so a topic search that finds nothing is never answered with
+    "did you mean" someone.
     """
+    words = _filter_name_words(plan, catalog)
+    if words:
+        return " ".join(words)
+    return _free_text_name(plan, question)
+
+
+def _free_text_name(plan: QueryPlan, question: str) -> str:
+    capitalised = {
+        word.casefold() for word in re.findall(r"[^\W\d_][\w'’-]*", question or "") if word[:1].isupper()
+    }
+    if not capitalised:
+        return ""
+    for step in plan.steps:
+        if step.op not in _FREE_TEXT_OPS or not step.query:
+            continue
+        tokens = step.query.split()
+        if 1 <= len(tokens) <= 4 and all(token.casefold() in capitalised for token in tokens):
+            return " ".join(tokens)
+    return ""
+
+
+def _filter_name_words(plan: QueryPlan, catalog: FieldCatalog) -> list[str]:
     words: list[str] = []
     for step in plan.steps:
         file_ids = step.file_ids or plan.scope.file_ids
@@ -87,21 +118,36 @@ def searched_name(plan: QueryPlan, catalog: FieldCatalog) -> str:
                     text = str(item or "").strip()
                     if text and text not in words:
                         words.append(text)
-    return " ".join(words)
+    return words
 
 
-def rewrite_for(plan: QueryPlan, catalog: FieldCatalog, corrected: str) -> QueryPlan:
+def rewrite_for(
+    plan: QueryPlan,
+    catalog: FieldCatalog,
+    corrected: str,
+    *,
+    searched_for: str = "",
+) -> QueryPlan:
     """The same plan, asking about the corrected name instead.
 
     Every name filter is replaced by one CONTAINS per token of the corrected name, on the
-    field the planner chose. The rest of the plan -- its goal, grouping, projection, limits
-    -- is untouched, so the researcher gets the answer to the question they asked.
+    field the planner chose, and a free-text search for the misspelt name searches for the
+    corrected one. The rest of the plan -- its goal, grouping, projection, limits -- is
+    untouched, so the researcher gets the answer to the question they asked.
     """
     tokens = [token for token in corrected.split() if token]
     if not tokens:
         return plan
+    searched = " ".join(searched_for.split()).casefold()
     steps = []
     for step in plan.steps:
+        if (
+            searched
+            and step.op in _FREE_TEXT_OPS
+            and " ".join((step.query or "").split()).casefold() == searched
+        ):
+            steps.append(step.model_copy(update={"query": corrected}))
+            continue
         file_ids = step.file_ids or plan.scope.file_ids
         kept: list[Predicate] = []
         replaced = False

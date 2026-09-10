@@ -162,6 +162,10 @@ services:
         # no credentials block, which is the right default for anything but a test build.
         NEXT_PUBLIC_TEST_USERNAME: ${PUBLIC_TEST_USERNAME:-}
         NEXT_PUBLIC_TEST_PASSWORD: ${PUBLIC_TEST_PASSWORD:-}
+        # This stack runs livekit and whisper, so voice works here and the control belongs
+        # in the UI. A deployment without them leaves it unset, and the button is absent
+        # rather than present and failing.
+        NEXT_PUBLIC_VOICE_ENABLED: ${VOICE_ENABLED:-true}
     environment:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
     ports:

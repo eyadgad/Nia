@@ -51,6 +51,12 @@ type ChatLine = {
 // Shown on the sign-in screen while this is a testing build. They live in the environment,
 // not in the repository: published login defaults were scrubbed from this project's history
 // once already. Unset means the block simply does not render.
+// Voice needs LiveKit and Whisper, which the hosted deployment does not run: pressing the
+// button there only ever produced "Could not start a voice session". Off unless a deployment
+// says otherwise, so the control is absent rather than present and broken. The voice code
+// itself is untouched -- set NEXT_PUBLIC_VOICE_ENABLED=true where those services exist.
+const VOICE_ENABLED = process.env.NEXT_PUBLIC_VOICE_ENABLED === "true";
+
 const TEST_USERNAME = process.env.NEXT_PUBLIC_TEST_USERNAME || "";
 const TEST_PASSWORD = process.env.NEXT_PUBLIC_TEST_PASSWORD || "";
 
@@ -1152,17 +1158,19 @@ export default function HomePage() {
               >
                 {copied ? <CheckIcon /> : <CopyIcon />}
               </button>
-              <button
-                type="button"
-                onClick={() => void toggleVoice()}
-                className={`nia-icon-button ${
-                  voiceState !== "Disconnected" && voiceState !== "Error" ? "is-active" : ""
-                }`}
-                aria-label={voiceState === "Disconnected" || voiceState === "Error" ? "Start voice" : "Stop voice"}
-                title={voiceState === "Disconnected" || voiceState === "Error" ? "Start voice" : "Stop voice"}
-              >
-                <VoiceIcon />
-              </button>
+              {VOICE_ENABLED ? (
+                <button
+                  type="button"
+                  onClick={() => void toggleVoice()}
+                  className={`nia-icon-button ${
+                    voiceState !== "Disconnected" && voiceState !== "Error" ? "is-active" : ""
+                  }`}
+                  aria-label={voiceState === "Disconnected" || voiceState === "Error" ? "Start voice" : "Stop voice"}
+                  title={voiceState === "Disconnected" || voiceState === "Error" ? "Start voice" : "Stop voice"}
+                >
+                  <VoiceIcon />
+                </button>
+              ) : null}
             </div>
           </header>
 
@@ -1206,7 +1214,7 @@ export default function HomePage() {
 
           <div className="nia-composer-dock">
             <div className="nia-composer-wrap">
-              {voiceState !== "Disconnected" && voiceState !== "Error" ? (
+              {VOICE_ENABLED && voiceState !== "Disconnected" && voiceState !== "Error" ? (
                 <VoiceBar
                   state={voiceState}
                   muted={voiceMuted}
@@ -1216,7 +1224,7 @@ export default function HomePage() {
                   onInterrupt={() => void interruptVoice()}
                   onDisconnect={() => void toggleVoice()}
                 />
-              ) : voiceError ? (
+              ) : VOICE_ENABLED && voiceError ? (
                 <div className="nia-voice-error">{voiceError}</div>
               ) : null}
 
@@ -1235,18 +1243,20 @@ export default function HomePage() {
                 />
                 <div className="nia-composer-footer">
                   <div className="nia-composer-tools">
-                    <button
-                      type="button"
-                      onClick={() => void toggleVoice()}
-                      className={`nia-tool-button ${
-                        voiceState !== "Disconnected" && voiceState !== "Error" ? "is-active" : ""
-                      }`}
-                      aria-label="Voice conversation"
-                      title="Voice conversation"
-                    >
-                      <VoiceIcon />
-                      <span>Voice</span>
-                    </button>
+                    {VOICE_ENABLED ? (
+                      <button
+                        type="button"
+                        onClick={() => void toggleVoice()}
+                        className={`nia-tool-button ${
+                          voiceState !== "Disconnected" && voiceState !== "Error" ? "is-active" : ""
+                        }`}
+                        aria-label="Voice conversation"
+                        title="Voice conversation"
+                      >
+                        <VoiceIcon />
+                        <span>Voice</span>
+                      </button>
+                    ) : null}
                   </div>
                   <button
                     type="submit"

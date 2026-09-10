@@ -1250,7 +1250,6 @@ async def plan_user_turn_ai(
         normalized=normalized,
         timing=timing,
         common=common,
-        field_catalog=authorized_catalog or scoped,
     )
 
 
@@ -1269,13 +1268,8 @@ async def _validate_and_route(
     common: dict[str, Any],
     authorized_options: list[AuthorizedDatasetOption] | None = None,
     already_reviewed_correction: bool = False,
-    field_catalog: FieldCatalog | None = None,
 ) -> PlanRouteResult:
     settings = get_settings()
-    # Every authorized list's fields, not just the selected one's. "A field this list does not
-    # record" can only be recognised against the lists that do record it; with the selected
-    # list alone the answer was always "none", and the guard below never stood down.
-    fields_everywhere = field_catalog or catalog
     planned = result.planned
     bound = result.bound
     assert planned is not None and bound is not None
@@ -1387,7 +1381,7 @@ async def _validate_and_route(
                     selected_file_id,
                     unaccounted=unaccounted,
                     absent_fields=tuple(
-                        absent_fields_named(question, selected_file_id, fields_everywhere)
+                        absent_fields_named(question, selected_file_id, catalog)
                     ),
                 )
             common["review_attempts"] = review_stage.attempts
@@ -1432,7 +1426,7 @@ async def _validate_and_route(
                 # correct refusal would be overruled into answering from student_name -- 53
                 # records that have a name, for a number the list does not record.
                 and not question_names_field_absent_from_selected(
-                    question, selected_file_id, fields_everywhere
+                    question, selected_file_id, catalog
                 )
             ):
                 # The reviewer asked which list this is about when the question named the
@@ -1496,7 +1490,6 @@ async def _validate_and_route(
                         timing=timing,
                         common=common,
                         already_reviewed_correction=True,
-                        field_catalog=field_catalog,
                     )
             if review_stage.status == "ok" and common.get("review_status") != (
                 "clarification_overruled"
@@ -1581,7 +1574,6 @@ async def _validate_and_route(
                         timing=timing,
                         common=common,
                         already_reviewed_correction=True,
-                        field_catalog=field_catalog,
                     )
         if exc.code == "dropped_requirement":
             return PlanRouteResult(

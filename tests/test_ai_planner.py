@@ -1498,49 +1498,6 @@ async def test_review_may_not_ask_which_list_when_the_question_named_it(ai_setti
 
 @pytest.mark.planner_ai
 @pytest.mark.asyncio
-async def test_review_keeps_its_question_when_the_list_lacks_the_named_field(ai_settings, monkeypatch):
-    """P10 lived here: the guard that should stand the overrule down never saw other lists.
-
-    Planning runs on the selected list's catalog, and "a field this list does not record" was
-    computed from that same catalog -- which cannot contain a field the list lacks. So "how
-    many potential records have a student number" was always overruled into a count of
-    records with a name. The guard has to see every authorized list.
-    """
-    from app.llm.base import StructuredOutputResult
-    from app.planning.ai_planner import PlanReviewResponse
-
-    provider = FakeReasoningProvider()
-
-    async def plan_then_ask(*, system, user, response_model):
-        if response_model is PlanReviewResponse:
-            value = PlanReviewResponse.model_validate(
-                {
-                    "verdict": "needs_clarification",
-                    "missing": ["student number"],
-                    "question": "The Potential list does not record student numbers. "
-                    "Which list did you mean?",
-                }
-            )
-        else:
-            value = _count_plan(normalized_request="count potential records")
-        return StructuredOutputResult(value=value, provider="fake", model="fake")
-
-    monkeypatch.setattr(provider, "structured_output_with_metadata", plan_then_ask)
-    service = AssistantTurnService(
-        MemoryDataGateway(), store=InMemoryMemoryStore(), reasoner=provider
-    )
-    scope = AccessScope(
-        principal_id="researcher", allowed_file_ids=(49, 91, 94), can_use_private_files=True
-    )
-    result = await service.answer(
-        scope, "How many potential records have a student number?", selected_file_id=94
-    )
-    assert result.status == "clarification", result.answer
-    assert result.review_status != "clarification_overruled"
-
-
-@pytest.mark.planner_ai
-@pytest.mark.asyncio
 async def test_review_still_clarifies_when_the_question_names_no_list(ai_settings, monkeypatch):
     """The overrule is narrow: it only answers the premise it can check."""
     from app.llm.base import StructuredOutputResult

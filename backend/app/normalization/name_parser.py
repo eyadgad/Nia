@@ -965,6 +965,69 @@ def extract_person_name(text: str) -> tuple[str, list[str], list[str]]:
     return working, flags, residue
 
 
+# A date written the way name cells write one: "January 21, 1905", "Sept. 3rd 1911".
+_CELL_DATE = rf"(?:{_MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s*\d{{4}}"
+_LEADING_DATE = re.compile(rf"^[^A-Za-z0-9]*{_CELL_DATE}\s*", re.IGNORECASE)
+_DATE_ONLY = re.compile(rf"^{_CELL_DATE}$", re.IGNORECASE)
+_FROM_MARKER = re.compile(r"^[^A-Za-z]*from\s+(?:the\s+)?", re.IGNORECASE)
+
+
+def place_from_residue(parts: NameParts) -> str:
+    """The community a name cell carries, when the cell's own structure says it is one.
+
+    Some lists were filled by pasting a whole row into the name cell: "Name<TAB>date<TAB>
+    community", the same run together with no separators, or "Name (Died: date) -- From X
+    First Nation". The parser already sets those fragments aside as residue so they never
+    become part of a name. The community in them is still a fact about the person, and where
+    the community column is blank for that row it is the only record of where they came from.
+
+    Only structure is trusted, never vocabulary: a fragment is read as a place when it follows
+    a date from the same pasted row, or is introduced by "From". A parenthetical gloss -- an
+    English rendering of an Indigenous name -- has neither, and is never taken for a place.
+    """
+    if {"placeholder", "narrative"} & set(parts.flags):
+        return ""
+    residue = [" ".join(item.split()) for item in parts.residue]
+    for index, fragment in enumerate(residue):
+        if not fragment or _DIED_NOTE.fullmatch(fragment) or fragment.casefold().startswith("died"):
+            continue
+        candidate = ""
+        dated = _LEADING_DATE.match(fragment)
+        if dated and fragment[dated.end():].strip():
+            candidate = fragment[dated.end():]
+        elif _FROM_MARKER.match(fragment):
+            candidate = fragment
+        elif index > 0 and "concatenated" in parts.flags and _DATE_ONLY.match(residue[index - 1]):
+            candidate = fragment
+        marker = _FROM_MARKER.match(candidate)
+        if marker:
+            candidate = candidate[marker.end():]
+        place = _clean_place(candidate)
+        if _looks_like_place(place):
+            return place
+    return ""
+
+
+def _clean_place(text: str) -> str:
+    place = " ".join((text or "").split()).strip(" .,;:-—–")
+    place = re.sub(r"\s+community$", "", place, flags=re.IGNORECASE).strip(" .,;:")
+    if place.count("(") > place.count(")"):
+        # The residue trims a closing bracket off "Muncey (Chippewas of the Thames)".
+        place += ")"
+    # "First Nation" says what kind of place it is, not which one. The community column on
+    # the same list writes "Walpole Island", and the two have to group together.
+    return re.sub(r"\s+First\s+Nation$", "", place, flags=re.IGNORECASE).strip(" .,;:")
+
+
+def _looks_like_place(text: str) -> bool:
+    return (
+        bool(text)
+        and text[0].isupper()
+        and not re.search(r"[\d:]", text)
+        and len(text.split()) <= 8
+    )
+
+
 def _looks_like_english_personal_name(text: str) -> bool:
     """Whether a cell looks like a complete English personal name rather than an Indigenous one."""
     words = [w.strip(".,") for w in text.split() if w.strip(".,")]

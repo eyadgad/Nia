@@ -153,7 +153,9 @@ CASES: tuple[Case, ...] = (
     Case("P06", 94, "What is the maximum recorded age at death in potential records?", "max", field="age_at_death"),
     Case("P07", 94, "List the first 5 potential records by name.", "list", field="student_name", direction="asc", limit=5, projection=("student_name",)),
     Case("P08", 94, "How many potential records mention another school?", "count", conditions=(Condition("other_schools", "known"),)),
-    Case("P09", 94, "How many potential records are from Garden River?", "unsupported"),
+    # Was "unsupported" while file 94 had no community field registered. The list does record
+    # origin -- in COMMUNITY/RESERVE and in pasted name cells -- so this is an ordinary count.
+    Case("P09", 94, "How many potential records are from Garden River?", "count", conditions=(Condition("community", "contains", "garden river"),)),
     Case("P10", 94, "How many potential records have a student number?", "unsupported"),
 )
 

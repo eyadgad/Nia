@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 from typing import Any
 
 import asyncpg
@@ -34,6 +35,7 @@ from app.normalization.name_parser import (
     master_parts_match_clean_source,
     parse_full_name,
     parse_master,
+    place_from_residue,
 )
 
 # Lists whose given/middle/surname already sit in their own source cells. Everything else
@@ -175,6 +177,49 @@ def block_for(parts: NameParts, override: dict[str, Any] | None) -> dict[str, st
     return block
 
 
+def fold_label(text: str) -> str:
+    """The folded form ingest stores in canonical_community, which is what filters match on."""
+    return " ".join(re.sub(r"[^0-9a-z]+", " ", (text or "").casefold()).split())
+
+
+def apply_community(
+    canonical: dict[str, Any],
+    recorded: str,
+    parts: NameParts,
+    *,
+    derive: bool,
+) -> str | None:
+    """Keep canonical.community in step with the row; return the folded column value to write.
+
+    A community the list records in its own column always wins. Only when that cell is blank
+    is one read from the name cell, and it is marked as derived so a later run -- with a
+    better parser, or after the column is filled -- can tell it from a recorded value.
+
+    Returns None to leave canonical_community as ingest wrote it, "" to clear a value an
+    earlier run derived, or the folded place when one is derived now.
+    """
+    if recorded:
+        if canonical.get("community_source") == "name_cell":
+            canonical.pop("community_source", None)
+            canonical["community"] = recorded
+            return fold_label(recorded)
+        if not canonical.get("community"):
+            # Display reads the canonical JSON before the folded column; without this the
+            # list's own values read back as "sault ste marie".
+            canonical["community"] = recorded
+        return None
+    place = place_from_residue(parts) if derive else ""
+    if place:
+        canonical["community"] = place
+        canonical["community_source"] = "name_cell"
+        return fold_label(place)
+    if canonical.get("community_source") == "name_cell":
+        canonical.pop("community", None)
+        canonical.pop("community_source", None)
+        return ""
+    return None
+
+
 def date_block(row: dict[str, Any], date_fields: list[str], sources: dict[str, list[str]]) -> dict:
     """Parse every date cell on the row into its recorded components.
 
@@ -240,6 +285,10 @@ async def run(
                     ("_year", "_month", "_day", "_iso", "_precision", "_extra", "_flags")
                 )
             ]
+            community_path = next(
+                (r["canonical_json_path"] for r in registry if r["semantic_field"] == "community"),
+                None,
+            )
             # Raw source columns first, canonical path last. The registry already records
             # which spreadsheet columns a field came from, so nothing is hardcoded here.
             sources: dict[str, list[str]] = {}
@@ -280,8 +329,8 @@ async def run(
                 )
             }
 
-            updates: list[tuple[int, str]] = []
-            named = flagged = curated = 0
+            updates: list[tuple[int, str, str | None]] = []
+            named = flagged = curated = derived_communities = 0
             dated = imprecise = multi = 0
             skipped_clean = 0
             for record in rows:
@@ -329,6 +378,18 @@ async def run(
                     curated += 1
                 canonical = dict(row["row_data_normalized"].get("canonical") or {})
                 canonical["name_parts"] = block
+                column_update: str | None = None
+                if community_path == "canonical.community" and not only_name_issues:
+                    # A list whose names sit in their own cells has no whole row pasted into
+                    # a name cell, so nothing there is read as a community.
+                    column_update = apply_community(
+                        canonical,
+                        _source_cell(row, "community", sources, raw_only=True),
+                        parts,
+                        derive=file_id not in SPLIT_NAME_FILES,
+                    )
+                    if canonical.get("community_source") == "name_cell":
+                        derived_communities += 1
                 if not only_name_issues:
                     dates = date_block(row, date_fields, sources)
                     if dates:
@@ -361,12 +422,15 @@ async def run(
                 # stored JSON payload.  This is what keeps already-clean single-word names
                 # untouched without any reference list or expected row count.
                 if merged != row["row_data_normalized"]:
-                    updates.append((row["id"], json.dumps(merged, ensure_ascii=False)))
+                    updates.append(
+                        (row["id"], json.dumps(merged, ensure_ascii=False), column_update)
+                    )
 
             total = len(rows)
             print(
                 f"file {file_id}: {total} rows | named {named} ({_pct(named, total)}) | "
-                f"flagged {flagged} | curated {curated}"
+                f"flagged {flagged} | curated {curated} | "
+                f"community from name cell {derived_communities}"
             )
             if only_name_issues and file_id in SPLIT_NAME_FILES:
                 print(f"  generic name-fix mode: skipped {skipped_clean} already-clean rows")
@@ -380,12 +444,23 @@ async def run(
             # Apply the changed set atomically. Rows whose computed payload is identical to
             # the stored payload never receive an UPDATE.
             async with conn.transaction():
+                # The folded column is what filters match on, so a derived community has to
+                # land there too; None leaves ingest's value, "" clears an earlier derivation.
                 await conn.executemany(
-                    "UPDATE public.file_data_normalized SET row_data_normalized = $2::jsonb "
+                    "UPDATE public.file_data_normalized SET row_data_normalized = $2::jsonb, "
+                    "canonical_community = CASE WHEN $3::text IS NULL THEN canonical_community "
+                    "ELSE NULLIF($3::text, '') END "
                     "WHERE id = $1",
                     updates,
                 )
             print(f"  wrote {len(updates)} rows")
+        if not dry_run:
+            try:
+                # Fill rates tell the planner which field holds a value; a community just
+                # derived changes that for its list.
+                await conn.execute("SELECT assistant.refresh_fill_rates()")
+            except asyncpg.PostgresError as exc:
+                print(f"fill rates not refreshed: {exc}")
     finally:
         await conn.close()
 

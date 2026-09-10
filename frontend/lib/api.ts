@@ -296,10 +296,18 @@ export async function deleteConversation(conversationId: string): Promise<void> 
   }
 }
 
+export type ReportAttachment = {
+  filename: string;
+  contentType: string;
+  dataBase64: string;
+  byteSize: number;
+};
+
 export async function submitFeedback(input: {
   comment: string;
   reporterName?: string;
   conversationId?: string | null;
+  attachments?: ReportAttachment[];
 }): Promise<void> {
   const response = await authorizedFetch("/api/assistant/feedback", {
     method: "POST",
@@ -311,10 +319,25 @@ export async function submitFeedback(input: {
       // The server stamps the renamed conversation with this, so the time in the sidebar
       // is the one the reporter's own clock showed. getTimezoneOffset counts the other way.
       tz_offset_minutes: -new Date().getTimezoneOffset(),
+      attachments: (input.attachments ?? []).map((item) => ({
+        filename: item.filename,
+        content_type: item.contentType,
+        data_base64: item.dataBase64,
+      })),
     }),
   });
   if (!response.ok) {
-    throw new Error("Could not send that report.");
+    // A refused file comes back with a reason worth showing ("… is too large to attach").
+    let detail = "";
+    try {
+      const payload = (await response.json()) as { detail?: unknown };
+      if (typeof payload.detail === "string") detail = payload.detail;
+    } catch {
+      // Not JSON; the generic message below stands.
+    }
+    throw new Error(
+      detail || (response.status === 413 ? "Those files are too large to send." : "Could not send that report."),
+    );
   }
 }
 

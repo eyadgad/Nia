@@ -7,6 +7,7 @@ import {
   ConversationTurn,
   Dataset,
   QueryListResult,
+  ReportAttachment,
   Session,
   fetchConversation,
   apiTargetIsUnreachable,
@@ -23,6 +24,7 @@ import {
   streamQuery,
 } from "@/lib/api";
 import { VoiceBar } from "@/components/voice-bar";
+import { RichText } from "./rich-text";
 import {
   VoiceMessage,
   VoicePreference,
@@ -674,11 +676,37 @@ export default function HomePage() {
   const [reportSending, setReportSending] = useState(false);
   const [reportSent, setReportSent] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [reportFiles, setReportFiles] = useState<ReportAttachment[]>([]);
+  const [reportAttaching, setReportAttaching] = useState(false);
+
+  async function addReportFiles(files: File[]) {
+    if (!files.length) return;
+    setReportError(null);
+    setReportAttaching(true);
+    try {
+      const room = REPORT_MAX_FILES - reportFiles.length;
+      if (room <= 0) throw new Error(`You can attach up to ${REPORT_MAX_FILES} files.`);
+      const added: ReportAttachment[] = [];
+      for (const file of files.slice(0, room)) added.push(await toReportAttachment(file));
+      const next = [...reportFiles, ...added];
+      if (next.reduce((sum, item) => sum + item.byteSize, 0) > REPORT_MAX_TOTAL_BYTES) {
+        throw new Error("Those files are too large together. Attach fewer or smaller ones.");
+      }
+      setReportFiles(next);
+      if (files.length > room) {
+        setReportError(`Only ${REPORT_MAX_FILES} files can be attached; the rest were left out.`);
+      }
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : "That file could not be attached.");
+    } finally {
+      setReportAttaching(false);
+    }
+  }
 
   async function sendReport(event: FormEvent) {
     event.preventDefault();
     const comment = reportComment.trim();
-    if (!comment || reportSending) return;
+    if (!comment || reportSending || reportAttaching) return;
     setReportSending(true);
     setReportError(null);
     try {
@@ -686,9 +714,11 @@ export default function HomePage() {
         comment,
         reporterName: reportName.trim(),
         conversationId,
+        attachments: reportFiles,
       });
       setReportSent(true);
       setReportComment("");
+      setReportFiles([]);
       // The server renames the conversation to mark it as reported, so the sidebar is a
       // turn out of date until it is asked again.
       void refreshConversations().catch(() => {});
@@ -1302,7 +1332,8 @@ export default function HomePage() {
                 <form onSubmit={sendReport} className="nia-report-form">
                   <p className="nia-report-intro">
                     Found a bug, or an answer that was inaccurate or inappropriate? Tell us
-                    what happened. Your current chat is attached automatically.
+                    what happened. Your current chat is attached automatically, and you can add
+                    a screenshot or a document.
                   </p>
                   <label>
                     <span>Your name</span>
@@ -1322,13 +1353,59 @@ export default function HomePage() {
                       rows={6}
                       required
                       onChange={(event) => setReportComment(event.target.value)}
+                      onPaste={(event) => {
+                        // A screenshot copied to the clipboard is pasted straight in as a file.
+                        const pasted = Array.from(event.clipboardData.files);
+                        if (!pasted.length) return;
+                        event.preventDefault();
+                        void addReportFiles(pasted);
+                      }}
                     />
                   </label>
+                  <div className="nia-report-attach">
+                    <span>
+                      Screenshots or documents <em>(optional)</em>
+                    </span>
+                    <label className="nia-report-attach-button">
+                      <input
+                        type="file"
+                        multiple
+                        accept={REPORT_TYPES.join(",")}
+                        disabled={reportAttaching || reportFiles.length >= REPORT_MAX_FILES}
+                        onChange={(event) => {
+                          const picked = Array.from(event.target.files ?? []);
+                          event.target.value = "";
+                          void addReportFiles(picked);
+                        }}
+                      />
+                      {reportAttaching ? "Attaching…" : "Attach files"}
+                    </label>
+                    <small>You can also paste a screenshot into the comments.</small>
+                    {reportFiles.length ? (
+                      <ul className="nia-report-files">
+                        {reportFiles.map((file, index) => (
+                          <li key={`${file.filename}-${index}`}>
+                            <span>{file.filename}</span>
+                            <small>{formatBytes(file.byteSize)}</small>
+                            <button
+                              type="button"
+                              aria-label={`Remove ${file.filename}`}
+                              onClick={() =>
+                                setReportFiles((items) => items.filter((_, at) => at !== index))
+                              }
+                            >
+                              ×
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
                   {reportError ? <p className="nia-form-error">{reportError}</p> : null}
                   <button
                     type="submit"
                     className="nia-primary-button"
-                    disabled={reportSending || !reportComment.trim()}
+                    disabled={reportSending || reportAttaching || !reportComment.trim()}
                   >
                     {reportSending ? "Sending…" : "Submit report"}
                   </button>
@@ -1386,7 +1463,7 @@ function ChatMessage({
     <article className={`nia-message ${isUser ? "is-user" : "is-assistant"}`}>
       {isUser ? (
         <div className={`nia-user-message ${line.partial ? "is-partial" : ""}`}>
-          <p>{line.text || "…"}</p>
+          {line.text ? <RichText text={line.text} /> : <p>…</p>}
         </div>
       ) : (
         <div className="nia-assistant-row">
@@ -1402,7 +1479,7 @@ function ChatMessage({
                   <StructuredListResult key={result.action_id} result={result} />
                 ))
               ) : line.text ? (
-                <p>{line.text}</p>
+                <RichText text={line.text} />
               ) : line.progress ? (
                 <div className="nia-progress" role="status">
                   <TypingIndicator />
@@ -1494,6 +1571,85 @@ function displayResultValue(value: unknown): string {
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (Array.isArray(value)) return value.map(displayResultValue).join(", ");
   return String(value);
+}
+
+// A report travels through the frontend host's proxy, which refuses large bodies, so the
+// files ride small: screenshots are shrunk before they are sent, and the total is capped.
+const REPORT_MAX_FILES = 3;
+const REPORT_MAX_TOTAL_BYTES = 3 * 1024 * 1024;
+const REPORT_IMAGE_MAX_EDGE = 1600;
+const REPORT_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+  "text/plain",
+];
+
+async function toReportAttachment(file: File): Promise<ReportAttachment> {
+  const label = file.name || "That file";
+  if (!REPORT_TYPES.includes(file.type)) {
+    throw new Error(`${label} can't be attached: use an image, a PDF, or plain text.`);
+  }
+  const blob = file.type.startsWith("image/") && file.type !== "image/gif" ? await shrinkImage(file) : file;
+  const baseName = file.name || "screenshot";
+  const filename =
+    blob.type === file.type ? baseName : `${baseName.replace(/\.[^.]+$/, "")}.jpg`;
+  return {
+    filename,
+    contentType: blob.type || file.type,
+    dataBase64: await readBase64(blob),
+    byteSize: blob.size,
+  };
+}
+
+async function shrinkImage(file: File): Promise<Blob> {
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const element = new Image();
+      element.onload = () => resolve(element);
+      element.onerror = () => reject(new Error(`${file.name || "That image"} could not be read.`));
+      element.src = url;
+    });
+    const edge = Math.max(image.naturalWidth, image.naturalHeight) || 1;
+    const scale = Math.min(1, REPORT_IMAGE_MAX_EDGE / edge);
+    if (scale === 1 && file.size <= 600 * 1024) return file;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return file;
+    // JPEG has no transparency; paint the page colour behind the image first.
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const shrunk = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.86),
+    );
+    return shrunk && shrunk.size < file.size ? shrunk : file;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function readBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(new Error("That file could not be read."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function starterPrompts(datasetLabel?: string | null) {

@@ -19,9 +19,12 @@ from app.db.pool import get_pool
 from app.execution.turn import AssistantTurnService, TurnResult
 from app.llm.factory import allowed_models, get_reasoning_provider
 from app.memory.feedback import (
+    MAX_ATTACHMENTS,
+    MAX_ATTACHMENTS_TOTAL_BYTES,
     MAX_COMMENT,
     MAX_NAME,
     FeedbackReport,
+    decode_attachment,
     default_feedback_store,
 )
 from app.memory.store import default_memory_store
@@ -229,6 +232,13 @@ async def delete_conversation(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+class FeedbackAttachmentRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=200)
+    content_type: str = Field(min_length=1, max_length=100)
+    # Base64 is a third larger than the file it carries; the decoded size is checked after.
+    data_base64: str = Field(min_length=1, max_length=(MAX_ATTACHMENTS_TOTAL_BYTES * 4) // 3 + 8)
+
+
 class FeedbackRequest(BaseModel):
     comment: str = Field(min_length=1, max_length=MAX_COMMENT)
     reporter_name: str = Field(default="", max_length=MAX_NAME)
@@ -238,6 +248,10 @@ class FeedbackRequest(BaseModel):
     # will read next to their own memory of filing it, so it should say what their clock
     # said. Bounded to the range real offsets occupy; absent means UTC.
     tz_offset_minutes: int | None = Field(default=None, ge=-840, le=840)
+    # A screenshot of what went wrong says more than a description of it.
+    attachments: list[FeedbackAttachmentRequest] = Field(
+        default_factory=list, max_length=MAX_ATTACHMENTS
+    )
 
 
 def reported_title(reporter_name: str, filed_at: datetime) -> str:
@@ -274,6 +288,18 @@ async def submit_feedback(
     if not comment:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="comment is required")
     reporter_name = body.reporter_name.strip()
+    try:
+        attachments = tuple(
+            decode_attachment(item.filename, item.content_type, item.data_base64)
+            for item in body.attachments
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    if sum(len(item.content) for item in attachments) > MAX_ATTACHMENTS_TOTAL_BYTES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Those files are too large together. Attach fewer or smaller ones.",
+        )
     await sink.record(
         scope,
         FeedbackReport(
@@ -281,6 +307,7 @@ async def submit_feedback(
             reporter_name=reporter_name,
             conversation_id=body.conversation_id,
             app_version=body.app_version.strip(),
+            attachments=attachments,
         ),
     )
     if body.conversation_id:

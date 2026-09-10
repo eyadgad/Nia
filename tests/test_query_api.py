@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import sys
 from pathlib import Path
 
@@ -331,6 +332,68 @@ def test_a_report_without_a_name_is_still_kept():
     [report] = client.reports.reports
     assert report.reporter_name == ""
     assert report.conversation_id is None
+
+
+_PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(32)).decode()
+
+
+def test_a_report_can_carry_a_screenshot():
+    """Testers asked to add "a picture of the issue"; the path it was taken from is dropped."""
+    client = _client()
+    sent = client.post(
+        "/api/assistant/feedback",
+        json={
+            "comment": "See the screenshot.",
+            "attachments": [
+                {"filename": "C:\\Users\\tester\\shot.png", "content_type": "image/png", "data_base64": _PNG}
+            ],
+        },
+    )
+    assert sent.status_code == 204
+    [report] = client.reports.reports
+    [attachment] = report.attachments
+    assert (attachment.filename, attachment.content_type) == ("shot.png", "image/png")
+    assert attachment.content.startswith(b"\x89PNG")
+
+
+def test_a_file_that_is_not_what_it_claims_is_refused_and_nothing_is_kept():
+    client = _client()
+    disguised = base64.b64encode(b"MZ\x90\x00 an executable, not an image").decode()
+    sent = client.post(
+        "/api/assistant/feedback",
+        json={
+            "comment": "Attached.",
+            "attachments": [{"filename": "shot.png", "content_type": "image/png", "data_base64": disguised}],
+        },
+    )
+    assert sent.status_code == 422
+    assert "does not look like" in sent.json()["detail"]
+    assert client.reports.reports == []
+
+
+def test_an_unsupported_kind_of_file_is_refused_with_a_reason():
+    client = _client()
+    sent = client.post(
+        "/api/assistant/feedback",
+        json={
+            "comment": "Attached.",
+            "attachments": [
+                {"filename": "tool.exe", "content_type": "application/x-msdownload", "data_base64": _PNG}
+            ],
+        },
+    )
+    assert sent.status_code == 422
+    assert "can't be attached" in sent.json()["detail"]
+
+
+def test_more_than_the_allowed_number_of_files_is_refused():
+    client = _client()
+    one = {"filename": "shot.png", "content_type": "image/png", "data_base64": _PNG}
+    sent = client.post(
+        "/api/assistant/feedback", json={"comment": "Attached.", "attachments": [one] * 4}
+    )
+    assert sent.status_code == 422
+    assert client.reports.reports == []
 
 
 def test_an_empty_report_is_refused():

@@ -20,6 +20,7 @@ from app.execution.formatter import (
     format_unplanned,
     is_plain_count,
 )
+from app.execution.match_review import read_matches, unchecked_words
 from app.execution.name_correction import (
     ask_text,
     corrected_prefix,
@@ -1201,6 +1202,13 @@ class AssistantTurnService:
             from app.planning.response_policy import acknowledgement
 
             ack = acknowledgement(route.turn_plan)
+        read_applied = (
+            await self._read_matches(question, plan, refinement, catalog, mode)
+            if refinement is not None
+            else False
+        )
+        if read_applied:
+            reasoning_calls += 1
         roster = await self._roster_for(scope, plan, execution, catalog)
         answer = format_deterministic_answer(question, plan, execution, catalog, roster=roster)
         if refinement is not None:
@@ -1215,7 +1223,7 @@ class AssistantTurnService:
         citations: list[str] = list(dict.fromkeys(item.source_id for item in packet.items))
         if packet.items:
             execution.evidence = packet
-        inference = False
+        inference = read_applied
         spoken_text = None
         streamed = False
         if self._should_synthesize(question, plan, route) and self._answer_reasoner() is not None:
@@ -1305,6 +1313,55 @@ class AssistantTurnService:
         except Exception:
             logger.warning("text search refinement skipped; running the plan as asked", exc_info=True)
             return None
+
+    async def _read_matches(
+        self,
+        question: str,
+        plan: QueryPlan,
+        refinement: TextSearchRefinement,
+        catalog: FieldCatalog,
+        mode: str,
+    ) -> bool:
+        """Read the listed records against what the word search could not check.
+
+        Only for a short, listed text-match answer whose question has words beyond the search,
+        and never in voice, where a spoken answer cannot carry a table of reasons. Any failure,
+        a timeout included, leaves the exact count to stand alone.
+        """
+        settings = get_settings()
+        reasoner = self._answer_reasoner()
+        if not settings.text_match_review or reasoner is None or mode == "voice":
+            return False
+        if not refinement.excerpts:
+            return False
+        labels = [
+            *refinement.field_labels,
+            *(
+                dataset.user_facing_label
+                for file_id in plan.scope.file_ids
+                if (dataset := catalog.dataset(file_id)) is not None
+            ),
+        ]
+        unchecked = unchecked_words(question, refinement.terms, labels)
+        if not unchecked:
+            return False
+        try:
+            async with asyncio.timeout(settings.text_match_review_timeout_s):
+                readings = await read_matches(reasoner, question, unchecked, refinement.records())
+        except TimeoutError:
+            logger.warning(
+                "match reading took longer than %ss; the exact count stands alone",
+                settings.text_match_review_timeout_s,
+            )
+            return False
+        except Exception:
+            logger.warning("match reading skipped; the exact count stands alone", exc_info=True)
+            return False
+        if not readings:
+            return False
+        refinement.unchecked = unchecked
+        refinement.readings = readings
+        return True
 
     async def _roster_for(
         self,

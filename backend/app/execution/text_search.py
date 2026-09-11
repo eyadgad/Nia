@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.execution.match_review import Reading, reading_summary
 from app.execution.name_correction import is_name_field
 from app.execution.roster import fetch_rows
 from app.execution.row_projection import semantic_value
@@ -66,13 +67,31 @@ class TextSearchRefinement:
     after: list[str] = field(default_factory=list)
     excerpts: list[Excerpt] = field(default_factory=list)
     number_label: str | None = None
+    # The words the excerpts were matched on and the fields they were read from, so the parts
+    # of the question the search did not check can be told apart from the parts it did.
+    terms: list[str] = field(default_factory=list)
+    field_labels: list[str] = field(default_factory=list)
+    unchecked: str = ""
+    readings: list[Reading] | None = None
+
+    def records(self) -> list[tuple[str, str]]:
+        """Each excerpt as plain text, for reading."""
+        return [(item.name, _plain_text(item.text)) for item in self.excerpts]
 
     def compose(self, answer: str) -> str:
         parts = [" ".join(self.before), answer, " ".join(self.after)]
+        if self.readings:
+            parts.append(
+                reading_summary(
+                    self.unchecked, [item.name for item in self.excerpts], self.readings
+                )
+            )
         if self.excerpts:
             parts.append(
                 "Each matching record, with the words it matched on:\n"
-                + excerpt_table(self.excerpts, number_label=self.number_label)
+                + excerpt_table(
+                    self.excerpts, number_label=self.number_label, readings=self.readings
+                )
             )
         return "\n\n".join(part for part in parts if part and part.strip())
 
@@ -178,11 +197,13 @@ async def refine_text_search(
         if where != list(step.where):
             steps[index] = step.model_copy(update={"where": where})
         if 0 < count <= EXCERPT_LIMIT and _answers_with_a_number(step, plan):
-            excerpts, number_label = await _excerpts(
+            excerpts, number_label, needles, labels = await _excerpts(
                 gateway, scope, file_ids, where, catalog, count
             )
             refinement.excerpts.extend(excerpts)
             refinement.number_label = refinement.number_label or number_label
+            refinement.terms.extend(needles)
+            refinement.field_labels.extend(labels)
     refinement.plan = plan.model_copy(update={"steps": steps})
     return refinement
 
@@ -366,23 +387,53 @@ async def _excerpts(
         number = _as_recorded(row, number_spec, catalog) if number_spec else ""
         excerpts.append(Excerpt(name=name or "Unnamed record", number=number, text=snippet))
     has_numbers = number_spec is not None and any(item.number for item in excerpts)
-    return excerpts, (number_spec.human_label if has_numbers and number_spec else None)
+    labels = list(
+        dict.fromkeys(
+            spec.human_label
+            for leaf in leaves
+            if (spec := _narrative_spec(leaf.field, file_ids, catalog)) is not None
+        )
+    )
+    return (
+        excerpts,
+        (number_spec.human_label if has_numbers and number_spec else None),
+        needles,
+        labels,
+    )
 
 
-def excerpt_table(excerpts: list[Excerpt], *, number_label: str | None) -> str:
-    header = ["Name", *([number_label] if number_label else []), "What the record says"]
+_FITS = {"yes": "Yes", "no": "No", "unclear": "Unclear"}
+
+
+def excerpt_table(
+    excerpts: list[Excerpt],
+    *,
+    number_label: str | None,
+    readings: list[Reading] | None = None,
+) -> str:
+    header = [
+        "Name",
+        *([number_label] if number_label else []),
+        "What the record says",
+        *(["Fits the question"] if readings else []),
+    ]
     lines = [
         "| " + " | ".join(header) + " |",
         "| " + " | ".join("---" for _ in header) + " |",
     ]
-    for item in excerpts:
+    for index, item in enumerate(excerpts):
         cells = [
             _cell(item.name),
             *([_cell(item.number or "Not recorded")] if number_label else []),
             item.text or "",
+            *([_FITS[readings[index].fits]] if readings else []),
         ]
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
+
+
+def _plain_text(text: str) -> str:
+    return text.replace("**", "").replace("\\|", "|").strip("… ")
 
 
 def _answers_with_a_number(step: Any, plan: QueryPlan) -> bool:

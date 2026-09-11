@@ -142,6 +142,10 @@ class Settings(BaseSettings):
     # Counting people rather than rows reads every matching row, so it is limited to lists
     # small enough for that to be cheap -- which are also the ones with blank and note rows.
     roster_max_rows: int = Field(default=1000, ge=0)
+    # A short text-match answer is read record by record against the words of the question the
+    # search could not check ("other schools"), beside the exact count. One bounded call.
+    text_match_review: bool = True
+    text_match_review_timeout_s: float = Field(default=30.0, gt=0)
     model_temperature: float = 0.0
     model_seed: int | None = None
     readiness_timeout_ms: int = 1500

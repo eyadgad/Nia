@@ -662,6 +662,18 @@ def _compile_branch(
                 ),
                 having_min_count=query.having_min_count or 2,
                 top_n=query.top_n,
+                # With two dates bounding each record's period, only members present at the
+                # same time count as sharing it.
+                interval_start=(
+                    _canonical_field(query.interval_start, file_ids, catalog)
+                    if query.interval_start and query.interval_end
+                    else None
+                ),
+                interval_end=(
+                    _canonical_field(query.interval_end, file_ids, catalog)
+                    if query.interval_start and query.interval_end
+                    else None
+                ),
                 file_ids=file_ids,
             )
         )

@@ -16,8 +16,10 @@ from app.data_gateway.protocol import (
     IntervalStats,
 )
 from app.execution.dag_scheduler import DagScheduler, RunTrace, ScheduledStep, StepResult
+from app.execution.overlap import OverlapResult, overlapping_groups
+from app.execution.roster import fetch_rows
 from app.planning.catalog import FieldCatalog
-from app.planning.plan_schema import PlanOp, PlanStep, Predicate, QueryPlan
+from app.planning.plan_schema import FilterOperator, PlanOp, PlanStep, Predicate, QueryPlan
 from app.retrieval.context_builder import build_evidence_packet
 from app.retrieval.deduplicator import dedupe_hits
 from app.retrieval.exact_search import score_exact
@@ -75,6 +77,7 @@ class ActionResult:
     interval_fields: tuple[str, str] | None = None
     percentage: dict[str, Any] | None = None
     requested_top_n: int | None = None
+    overlaps: OverlapResult | None = None
 
 
 @dataclass
@@ -98,6 +101,8 @@ class PlanExecutionError(ValueError):
 
 
 _RETRIEVAL_OPS = {PlanOp.EXACT_LOOKUP, PlanOp.FULL_TEXT_SEARCH, PlanOp.FUZZY_SEARCH}
+# Comparing periods reads every record that carries the shared value.
+_OVERLAP_ROW_LIMIT = 10_000
 _RESOURCE = {
     PlanOp.FILTER: "db",
     PlanOp.COUNT: "db",
@@ -280,6 +285,33 @@ class QueryExecutor:
             duplicate_field = step.fields[0] if step.fields else None
             if not duplicate_field:
                 raise PlanExecutionError("DUPLICATES requires a field")
+            if step.interval_start and step.interval_end:
+                # Sharing a value is not the question when periods were given: which of the
+                # records that share it were present at the same time is.
+                known = [
+                    *predicates,
+                    Predicate(field=duplicate_field, operator=FilterOperator.IS_KNOWN),
+                ]
+                total = await self._gateway.count_records(scope, file_ids, known)
+                if total > _OVERLAP_ROW_LIMIT:
+                    raise PlanExecutionError("too many records to compare their periods")
+                overlaps = overlapping_groups(
+                    await fetch_rows(self._gateway, scope, file_ids, known, total),
+                    self._catalog,
+                    group_field=duplicate_field,
+                    start_field=step.interval_start,
+                    end_field=step.interval_end,
+                    value_part=step.value_part,
+                    min_count=step.having_min_count or 2,
+                )
+                return StepResult(
+                    value={
+                        "overlaps": overlaps,
+                        "duplicate_field": duplicate_field,
+                        "predicates": predicates,
+                    },
+                    result_count=len(overlaps.groups),
+                )
             groups = await self._gateway.duplicate_values(
                 scope,
                 file_ids,
@@ -967,6 +999,7 @@ def _accumulate(bucket: ActionResult, value: dict[str, Any]) -> None:
         bucket.facts.append(ComputedFact(name="counts_by_file", value=dict(value["grouped"])))
     for key in (
         "ranked_groups",
+        "overlaps",
         "duplicates",
         "completeness",
         "intervals",

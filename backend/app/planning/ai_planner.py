@@ -169,6 +169,10 @@ GOALS
 - "distribution/breakdown" -> goal=rank with the field in group_by and no filter on that same field.
 - "most common/most frequent/highest number of" -> goal=rank with the dimension field in group_by
   and top_n=1 unless more are requested. Never put a count or an aggregate name in group_by.
+- Records that share a value AND were present at the same time ("at the same time", "during the
+  same period", "overlapping") -> goal=duplicates with the shared field in group_by, interval_start
+  and interval_end set to the two date fields that bound each record's own period, and
+  having_min_count set to how many must overlap (2 unless the question says more).
 - "highest/maximum/lowest/minimum/oldest/youngest/earliest/latest" of a value -> goal=aggregate with
   exactly one aggregate spec using max or min on that field.
 - "average/median/mode" -> goal=aggregate with exactly one aggregate spec on that field.

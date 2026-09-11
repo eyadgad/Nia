@@ -219,6 +219,8 @@ def _format_action(
         return _format_percentage(action, labels, constraint)
     if action.stats is not None:
         return _format_stats(action, labels)
+    if action.overlaps is not None:
+        return _format_overlaps(action, labels, catalog=catalog, file_ids=file_ids)
     if action.duplicates:
         return _format_duplicates(action, labels)
     if action.completeness:
@@ -626,6 +628,84 @@ def _format_percentage(action: ActionResult, scope_text: str, constraint: str) -
         f"{percent:.2f}% ({numerator:,} of {denominator:,}) of the {scope_text}"
         f"{subject}."
     )
+
+
+def _format_overlaps(
+    action: ActionResult,
+    scope_text: str,
+    *,
+    catalog: FieldCatalog,
+    file_ids: tuple[int, ...],
+) -> str:
+    """Groups sharing a value whose members were present at the same time, with what could be checked."""
+    result = action.overlaps
+    assert result is not None
+    need = result.min_count
+    noun = _record_noun(file_ids)
+    nouns = f"{noun}s"
+    shared_by = _field_label(result.group_field, file_ids, catalog)
+    start = _sentence_label(_field_label(result.start_field, file_ids, catalog))
+    end = _sentence_label(_field_label(result.end_field, file_ids, catalog))
+    if not result.shared:
+        return (
+            f"No **{shared_by}** value is shared by {need} or more {nouns} in the {scope_text}."
+        )
+    sentences = [
+        f"**{result.shared:,}** {'value' if result.shared == 1 else 'values'} of **{shared_by}** "
+        f"{'is' if result.shared == 1 else 'are each'} shared by {need} or more {nouns} in the "
+        f"{scope_text}.",
+        f"For **{result.checkable:,}** of them, at least {need} of those {nouns} have "
+        f"{_article(start)} {start} and {_article(end)} {end} that place them in time, and in "
+        f"**{len(result.groups):,}** of those, {need} or more were there during the same period.",
+    ]
+    unchecked = result.shared - result.checkable
+    if unchecked:
+        sentences.append(
+            f"The other **{unchecked:,}** cannot be checked: fewer than {need} of their {nouns} "
+            f"have both dates in a form that places them in time."
+        )
+    if not result.groups:
+        return " ".join(sentences)
+    rows: list[tuple[Any, ...]] = []
+    for group in result.groups[:_DISTRIBUTION_TOP]:
+        shown = "; ".join(
+            f"{stay.name} ({_years(stay.start, stay.end)})" for stay in group.together[:6]
+        )
+        if len(group.together) > 6:
+            shown += f"; and {len(group.together) - 6} more"
+        rows.append(
+            (
+                group.value,
+                f"{len(group.together)} of {group.members}",
+                shown,
+                _episode_years(group.episodes),
+            )
+        )
+    text = " ".join(sentences) + "\n\n" + _markdown_table(
+        [shared_by, "Together", f"Who ({start} to {end})", "When together"], rows
+    )
+    if len(result.groups) > _DISTRIBUTION_TOP:
+        text += f"\n\n…and {len(result.groups) - _DISTRIBUTION_TOP:,} more."
+    return text
+
+
+def _years(first: Any, last: Any) -> str:
+    return str(first.year) if first.year == last.year else f"{first.year}–{last.year}"
+
+
+def _episode_years(episodes: list[tuple[Any, Any]]) -> str:
+    """Separate stretches of togetherness, merged only where their years touch."""
+    merged: list[list[int]] = []
+    for began, ended in episodes:
+        if merged and began.year <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], ended.year)
+        else:
+            merged.append([began.year, ended.year])
+    return "; ".join(str(first) if first == last else f"{first}–{last}" for first, last in merged)
+
+
+def _article(phrase: str) -> str:
+    return "an" if phrase[:1].lower() in {"a", "e", "i", "o", "u"} else "a"
 
 
 def _format_duplicates(action: ActionResult, scope_text: str) -> str:

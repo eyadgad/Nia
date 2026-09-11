@@ -705,14 +705,14 @@ export default function HomePage() {
 
   async function sendReport(event: FormEvent) {
     event.preventDefault();
-    const comment = reportComment.trim();
-    if (!comment || reportSending || reportAttaching) return;
+    const name = reportName.trim();
+    if (!name || reportSending || reportAttaching) return;
     setReportSending(true);
     setReportError(null);
     try {
       await submitFeedback({
-        comment,
-        reporterName: reportName.trim(),
+        comment: reportComment.trim(),
+        reporterName: name,
         conversationId,
         attachments: reportFiles,
       });
@@ -1319,17 +1319,19 @@ export default function HomePage() {
                       className="nia-field"
                       value={reportName}
                       maxLength={120}
+                      required
                       onChange={(event) => setReportName(event.target.value)}
                     />
                   </label>
                   <label>
-                    <span>Comments</span>
+                    <span>
+                      Comments <em>(optional)</em>
+                    </span>
                     <textarea
                       className="nia-field nia-report-textarea"
                       value={reportComment}
                       maxLength={4000}
                       rows={6}
-                      required
                       onChange={(event) => setReportComment(event.target.value)}
                       onPaste={(event) => {
                         // A screenshot copied to the clipboard is pasted straight in as a file.
@@ -1383,7 +1385,7 @@ export default function HomePage() {
                   <button
                     type="submit"
                     className="nia-primary-button"
-                    disabled={reportSending || reportAttaching || !reportComment.trim()}
+                    disabled={reportSending || reportAttaching || !reportName.trim()}
                   >
                     {reportSending ? "Sending…" : "Submit report"}
                   </button>

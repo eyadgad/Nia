@@ -1001,6 +1001,7 @@ button:disabled { cursor: default; }
 .nia-report-form { display: flex; flex-direction: column; gap: 13px; margin-top: 16px; }
 .nia-report-form label { display: flex; flex-direction: column; gap: 6px; }
 .nia-report-form label span { color: var(--muted); font-size: 12px; font-weight: 560; }
+.nia-report-form label span em { font-style: normal; font-weight: 400; color: var(--subtle); }
 .nia-report-textarea { min-height: 120px; padding: 10px 12px; resize: vertical; line-height: 20px; }
 .nia-report-done { margin-top: 18px; display: flex; flex-direction: column; gap: 14px; }
 .nia-report-done p { margin: 0; color: var(--text); font-size: 14px; line-height: 21px; }

@@ -324,13 +324,17 @@ def test_a_tester_can_report_a_problem():
     assert report.conversation_id == conversation_id
 
 
-def test_a_report_without_a_name_is_still_kept():
-    """A finding is worth more than the field identifying who filed it."""
+def test_a_report_needs_a_name_but_not_a_comment():
+    """Whoever filed it must be askable; what they saw can be left to the chat and a screenshot."""
     client = _client()
-    sent = client.post("/api/assistant/feedback", json={"comment": "Voice cut out halfway."})
+    assert client.post("/api/assistant/feedback", json={"comment": "Voice cut out."}).status_code == 422
+    blank = client.post("/api/assistant/feedback", json={"reporter_name": "   ", "comment": "x"})
+    assert blank.status_code == 422
+    assert client.reports.reports == []
+    sent = client.post("/api/assistant/feedback", json={"reporter_name": "Sam Tester"})
     assert sent.status_code == 204
     [report] = client.reports.reports
-    assert report.reporter_name == ""
+    assert (report.reporter_name, report.comment) == ("Sam Tester", "")
     assert report.conversation_id is None
 
 
@@ -344,6 +348,7 @@ def test_a_report_can_carry_a_screenshot():
         "/api/assistant/feedback",
         json={
             "comment": "See the screenshot.",
+            "reporter_name": "Sam Tester",
             "attachments": [
                 {"filename": "C:\\Users\\tester\\shot.png", "content_type": "image/png", "data_base64": _PNG}
             ],
@@ -363,6 +368,7 @@ def test_a_file_that_is_not_what_it_claims_is_refused_and_nothing_is_kept():
         "/api/assistant/feedback",
         json={
             "comment": "Attached.",
+            "reporter_name": "Sam Tester",
             "attachments": [{"filename": "shot.png", "content_type": "image/png", "data_base64": disguised}],
         },
     )
@@ -377,6 +383,7 @@ def test_an_unsupported_kind_of_file_is_refused_with_a_reason():
         "/api/assistant/feedback",
         json={
             "comment": "Attached.",
+            "reporter_name": "Sam Tester",
             "attachments": [
                 {"filename": "tool.exe", "content_type": "application/x-msdownload", "data_base64": _PNG}
             ],
@@ -390,22 +397,25 @@ def test_more_than_the_allowed_number_of_files_is_refused():
     client = _client()
     one = {"filename": "shot.png", "content_type": "image/png", "data_base64": _PNG}
     sent = client.post(
-        "/api/assistant/feedback", json={"comment": "Attached.", "attachments": [one] * 4}
+        "/api/assistant/feedback",
+        json={"comment": "Attached.", "reporter_name": "Sam Tester", "attachments": [one] * 4},
     )
     assert sent.status_code == 422
     assert client.reports.reports == []
 
 
-def test_an_empty_report_is_refused():
+def test_a_report_without_a_name_is_refused_whatever_it_says():
     client = _client()
     assert client.post("/api/assistant/feedback", json={"comment": "   "}).status_code == 422
-    assert client.post("/api/assistant/feedback", json={"comment": ""}).status_code == 422
+    assert client.post("/api/assistant/feedback", json={"reporter_name": ""}).status_code == 422
     assert client.reports.reports == []
 
 
 def test_a_report_cannot_be_used_to_dump_unbounded_text():
     client = _client()
-    huge = client.post("/api/assistant/feedback", json={"comment": "x" * 4001})
+    huge = client.post(
+        "/api/assistant/feedback", json={"comment": "x" * 4001, "reporter_name": "Sam Tester"}
+    )
     assert huge.status_code == 422
     long_name = client.post(
         "/api/assistant/feedback", json={"comment": "fine", "reporter_name": "n" * 121}
@@ -514,25 +524,26 @@ def test_reporting_a_chat_renames_it_so_it_can_be_found_again():
     assert client.get(f"/api/assistant/conversations/{conversation_id}").json()["turns"]
 
 
-def test_an_unnamed_report_still_marks_the_chat():
-    """A missing name is no reason to lose track of the conversation."""
+def test_a_refused_report_leaves_the_chat_as_it_was():
+    """A report turned away for having no name must not mark the chat as reported."""
     store = InMemoryMemoryStore()
     client = _client(store)
     conversation_id = _make_conversation(client)
 
-    client.post(
+    refused = client.post(
         "/api/assistant/feedback",
         json={"comment": "Voice cut out.", "conversation_id": conversation_id},
     )
+    assert refused.status_code == 422
     listed = client.get("/api/assistant/conversations").json()["conversations"]
     title = {item["id"]: item["title"] for item in listed}[conversation_id]
-    assert title.startswith("Reported - ")
-    assert "None" not in title
+    assert not title.startswith("Reported - ")
 
 
 def test_a_report_with_no_chat_attached_renames_nothing():
     client = _client()
-    assert client.post("/api/assistant/feedback", json={"comment": "general note"}).status_code == 204
+    sent = client.post("/api/assistant/feedback", json={"reporter_name": "Sam Tester"})
+    assert sent.status_code == 204
     assert client.get("/api/assistant/conversations").json()["conversations"] == []
 
 

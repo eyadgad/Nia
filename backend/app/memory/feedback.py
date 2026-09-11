@@ -149,7 +149,7 @@ class PostgresFeedbackStore:
                     RETURNING id
                     """,
                     conversation_id,
-                    report.comment,
+                    report.comment or None,
                     report.reporter_name or None,
                     scope.principal_id,
                     report.app_version or None,

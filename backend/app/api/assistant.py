@@ -240,8 +240,10 @@ class FeedbackAttachmentRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    comment: str = Field(min_length=1, max_length=MAX_COMMENT)
-    reporter_name: str = Field(default="", max_length=MAX_NAME)
+    # Who filed it is required: a report nobody can be asked about cannot be followed up. What
+    # they saw is optional -- the chat is attached, and often a screenshot says it better.
+    comment: str = Field(default="", max_length=MAX_COMMENT)
+    reporter_name: str = Field(min_length=1, max_length=MAX_NAME)
     conversation_id: str | None = None
     app_version: str = Field(default="", max_length=64)
     # Minutes to add to UTC to get the reporter's clock. The title carries a time someone
@@ -258,8 +260,8 @@ def reported_title(reporter_name: str, filed_at: datetime) -> str:
     """What a reported conversation is called afterwards.
 
     Named so the sidebar sorts the complaints to hand and says who to ask about each one.
-    An unnamed report still gets the marker and the time: the point is to find the
-    conversation again, and a missing name is no reason to lose it.
+    The endpoint refuses a report without a name; a blank one here still yields the marker
+    and the time rather than an empty slot in the title.
     """
     stamp = filed_at.strftime("%d/%m %H:%M")
     name = " ".join(reporter_name.split())
@@ -284,10 +286,10 @@ async def submit_feedback(
     report is the thing worth keeping, and losing it because a title could not be written
     would be the wrong way round.
     """
-    comment = body.comment.strip()
-    if not comment:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="comment is required")
     reporter_name = body.reporter_name.strip()
+    if not reporter_name:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="name is required")
+    comment = body.comment.strip()
     try:
         attachments = tuple(
             decode_attachment(item.filename, item.content_type, item.data_base64)

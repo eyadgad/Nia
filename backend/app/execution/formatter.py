@@ -648,7 +648,8 @@ def _format_overlaps(
     end = _sentence_label(_field_label(result.end_field, file_ids, catalog))
     if not result.shared:
         return (
-            f"No **{shared_by}** value is shared by {need} or more {nouns} in the {scope_text}."
+            f"Grouping the {nouns} in the {scope_text} by the exact text of **{shared_by}**, no "
+            f"value is shared by {need} or more of them, so there are no groups to compare."
         )
     sentences = [
         f"**{result.shared:,}** {'value' if result.shared == 1 else 'values'} of **{shared_by}** "

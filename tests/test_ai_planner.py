@@ -1482,6 +1482,84 @@ def test_a_question_naming_the_selected_list_is_recognized_as_such():
     assert names_own("How many records are in additional deaths?", 93, []) is False
 
 
+def _grouped_plan(**kwargs) -> PlannedTurn:
+    return _count_plan(
+        goal="duplicates",
+        group_by=["parents_names"],
+        normalized_request="families with several children at the same time",
+        **kwargs,
+    )
+
+
+@pytest.mark.planner_ai
+@pytest.mark.asyncio
+async def test_a_same_period_question_gets_one_retry_to_compare_periods(ai_settings):
+    """The planner wrote "during the same period" down and still grouped by names alone."""
+    provider = FakeReasoningProvider()
+    provider.structured_queue = [
+        _grouped_plan(),
+        _grouped_plan(interval_start="admitted_date", interval_end="discharged_date"),
+        ReviewComplete(),
+    ]
+    service = AssistantTurnService(MemoryDataGateway(), store=InMemoryMemoryStore(), reasoner=provider)
+    result = await service.answer(
+        _scope(),
+        "Are there families with several children attending during the same period?",
+        selected_file_id=49,
+    )
+    assert result.status == "answered", result.answer
+    assert result.planner_retry_count == 1
+    [step] = [item for item in result.plan.steps if item.op.value == "DUPLICATES"]
+    assert (step.interval_start, step.interval_end) == ("admitted_date", "discharged_date")
+
+
+@pytest.mark.planner_ai
+@pytest.mark.asyncio
+async def test_a_second_plan_without_periods_is_still_answered(ai_settings):
+    """The retry is feedback, not a gate: failing it twice must not cost the researcher an answer."""
+    provider = FakeReasoningProvider()
+    provider.structured_queue = [_grouped_plan(), _grouped_plan(), ReviewComplete()]
+    service = AssistantTurnService(MemoryDataGateway(), store=InMemoryMemoryStore(), reasoner=provider)
+    result = await service.answer(
+        _scope(),
+        "Are there families with several children attending during the same period?",
+        selected_file_id=49,
+    )
+    assert result.status == "answered", result.answer
+    assert result.planner_retry_count == 1
+
+
+def test_a_review_correction_keeps_the_periods_a_same_time_question_compares():
+    from app.planning.ai_planner import _keep_period_comparison
+
+    original = _grouped_plan(interval_start="admitted_date", interval_end="discharged_date")
+    corrected = _count_plan(goal="rank", group_by=["parents_names"])
+    question = "Are there families with several children attending during the same period?"
+    kept = _keep_period_comparison(corrected, original, question)
+    [action] = kept.query_actions()
+    assert (action.goal, action.interval_start, action.interval_end) == (
+        "duplicates",
+        "admitted_date",
+        "discharged_date",
+    )
+    assert [item.goal for item in kept.stated_requirements if item.kind == "goal"] == ["duplicates"]
+    # A question about no period leaves the correction exactly as the reviewer wrote it.
+    assert _keep_period_comparison(corrected, original, "Which parents names repeat?") is corrected
+
+
+@pytest.mark.planner_ai
+@pytest.mark.asyncio
+async def test_a_grouping_question_about_no_period_is_not_retried(ai_settings):
+    provider = FakeReasoningProvider()
+    provider.structured_queue = [_grouped_plan(), ReviewComplete()]
+    service = AssistantTurnService(MemoryDataGateway(), store=InMemoryMemoryStore(), reasoner=provider)
+    result = await service.answer(
+        _scope(), "Which parents names appear on more than one record?", selected_file_id=49
+    )
+    assert result.status == "answered", result.answer
+    assert result.planner_retry_count == 0
+
+
 @pytest.mark.planner_ai
 @pytest.mark.asyncio
 async def test_review_may_not_ask_which_list_when_the_question_named_it(ai_settings, monkeypatch):

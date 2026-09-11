@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.llm.base import ReasoningProvider, StructuredOutputResult, TransientReasoningError
 from app.planning.ai_catalog_coerce import coerce_planned_turn
 from app.planning.ai_turn_schema import (
+    GoalRequirement,
     PlannedConversationAction,
     PlannedQueryAction,
     PlannedTurn,
@@ -414,6 +415,9 @@ class AIPlanner:
                     selected_file_id=selected_file_id,
                     options=authorized_options,
                 )
+                if attempts == 1:
+                    # Feedback, not a gate: a second plan without periods is still answered.
+                    _assert_periods_expressed(result.value, question=question)
                 return (
                     PlannerStageResult(
                         stage="primary",
@@ -816,6 +820,86 @@ def question_names_field_absent_from_selected(
     catalog: FieldCatalog,
 ) -> bool:
     return bool(absent_fields_named(question, selected_file_id, catalog))
+
+
+# How a question says the records it groups were present at the same time. English phrasing, not
+# the vocabulary of any list.
+_TOGETHER_SHAPE = re.compile(
+    r"\b(?:at\s+the\s+same\s+time|(?:during|in|over)\s+the\s+same\s+(?:time|period|years?)"
+    r"|overlap(?:s|ped|ping)?|concurrent(?:ly)?|simultaneous(?:ly)?|at\s+once)\b",
+    re.IGNORECASE,
+)
+
+
+def _assert_periods_expressed(planned: PlannedTurn, *, question: str) -> None:
+    """A question about who was present at the same time needs the periods it compares.
+
+    The planner recognised "during the same period" -- it wrote it among its own stated
+    requirements -- and still grouped by parents' names alone, filing the condition under the
+    goal so the parity check had nothing to object to. The answer then counted siblings a decade
+    apart as a family attending together. One retry names what is missing; the planner chooses
+    the date fields, since which two bound a record's period is a question about the list.
+    """
+    if not _TOGETHER_SHAPE.search(question or ""):
+        return
+    grouped = [
+        action
+        for action in planned.query_actions()
+        if action.goal in {"duplicates", "rank"} and action.group_by
+    ]
+    if not grouped or any(action.interval_start and action.interval_end for action in grouped):
+        return
+    raise PlannerContractError(
+        "the question asks whether records sharing a value were present at the same time, but "
+        "no period is compared: use goal=duplicates with the shared field in group_by and set "
+        "interval_start and interval_end to the two date fields that bound each record's own "
+        "period"
+    )
+
+
+def _keep_period_comparison(
+    corrected: PlannedTurn, original: PlannedTurn | None, question: str
+) -> PlannedTurn:
+    """A review correction may not drop the periods a same-time question compares.
+
+    The primary plan grouped by parents' names and compared admission periods; the reviewer's
+    "corrected" plan kept the grouping and lost the periods, and its answer counted siblings
+    regardless of when they attended. The correction is kept -- it may have fixed something
+    else -- with the period comparison carried back onto the grouping it came from.
+    """
+    if original is None or not _TOGETHER_SHAPE.search(question or ""):
+        return corrected
+    periods = {
+        tuple(action.group_by): (action.interval_start, action.interval_end)
+        for action in original.query_actions()
+        if action.group_by and action.interval_start and action.interval_end
+    }
+    if not periods:
+        return corrected
+    actions = list(corrected.actions)
+    requirements = list(corrected.stated_requirements)
+    changed = False
+    for index, action in enumerate(actions):
+        if not isinstance(action, PlannedQueryAction) or action.goal not in {"duplicates", "rank"}:
+            continue
+        if action.interval_start and action.interval_end:
+            continue
+        kept = periods.get(tuple(action.group_by))
+        if kept is None:
+            continue
+        actions[index] = action.model_copy(
+            update={"goal": "duplicates", "interval_start": kept[0], "interval_end": kept[1]}
+        )
+        requirements = [
+            item.model_copy(update={"goal": "duplicates"})
+            if isinstance(item, GoalRequirement) and item.action_index == index
+            else item
+            for item in requirements
+        ]
+        changed = True
+    if not changed:
+        return corrected
+    return corrected.model_copy(update={"actions": actions, "stated_requirements": requirements})
 
 
 def _assert_grounded_dataset_not_selected(
@@ -1472,6 +1556,7 @@ async def _validate_and_route(
             if verdict == "corrected":
                 corrected = (review_stage.output_metadata or {}).get("plan")
                 if isinstance(corrected, PlannedTurn):
+                    corrected = _keep_period_comparison(corrected, result.planned, question)
                     corrected_result = AIPlanningResult(
                         planned=corrected,
                         bound=bind_scope(corrected, selected_file_id),
@@ -1557,6 +1642,7 @@ async def _validate_and_route(
                     )
                 corrected = (salvage.output_metadata or {}).get("plan")
                 if verdict == "corrected" and isinstance(corrected, PlannedTurn):
+                    corrected = _keep_period_comparison(corrected, result.planned, question)
                     common["review_status"] = "corrected"
                     return await _validate_and_route(
                         AIPlanningResult(

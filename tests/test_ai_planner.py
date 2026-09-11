@@ -850,6 +850,37 @@ def test_dataset_not_selected_requires_named_other_source():
     )
 
 
+def test_a_question_naming_the_selected_list_is_never_sent_elsewhere():
+    """P09: a reply that named no list was believed over a question that named this one."""
+    scope = AccessScope(
+        principal_id="researcher", allowed_file_ids=(49, 91, 94), can_use_private_files=True
+    )
+    options = authorized_dataset_options(static_catalog().for_scope(scope))
+    action = PlannedConversationAction(
+        intent="dataset_not_selected",
+        response="Garden River is not something this list records.",
+    )
+    assert (
+        should_honor_dataset_not_selected(
+            action,
+            question="How many potential records are from Garden River?",
+            selected_file_id=94,
+            options=options,
+        )
+        is False
+    )
+    # Naming a different list is still what the redirect is for.
+    assert (
+        should_honor_dataset_not_selected(
+            action,
+            question="How many confirmed deaths are from Garden River?",
+            selected_file_id=94,
+            options=options,
+        )
+        is True
+    )
+
+
 @pytest.mark.asyncio
 async def test_malformed_review_has_no_retry(ai_settings):
     provider = FakeReasoningProvider()

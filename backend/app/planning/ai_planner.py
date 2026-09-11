@@ -726,6 +726,12 @@ def should_honor_dataset_not_selected(
 ) -> bool:
     """True only when the user actually named a different source."""
     selected = next((item for item in options if item.file_id == selected_file_id), None)
+    # A question that names the list it is on, and no other, is about that list whatever the
+    # planner's reply says. "How many potential records are from Garden River?" on Potential was
+    # redirected because the reply named no list at all, and a reply that names nothing was
+    # enough to be believed.
+    if question_names_only_the_selected_list(question, selected_file_id, options):
+        return False
     response = (action.response or "").strip()
     if response:
         if (

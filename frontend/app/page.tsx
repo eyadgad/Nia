@@ -831,16 +831,6 @@ export default function HomePage() {
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
 
-  function useSuggestion(text: string) {
-    setQuestion(text);
-    window.setTimeout(() => {
-      composerRef.current?.focus();
-      if (composerRef.current) {
-        composerRef.current.style.height = "auto";
-        composerRef.current.style.height = `${Math.min(composerRef.current.scrollHeight, 160)}px`;
-      }
-    }, 0);
-  }
 
   if (!hydrated) {
     return (
@@ -1214,18 +1204,6 @@ export default function HomePage() {
                     Working in <strong>{activeDataset.user_facing_label}</strong>
                   </div>
                 ) : null}
-                <div className="nia-suggestions">
-                  {(activeDataset?.starter_prompts?.length
-                    ? activeDataset.starter_prompts
-                    : starterPrompts(activeDataset?.user_facing_label)
-                  ).map((prompt) => (
-                    <button key={prompt.title} type="button" onClick={() => useSuggestion(prompt.prompt)}>
-                      <span>{prompt.title}</span>
-                      <small>{prompt.caption}</small>
-                      <ArrowDiagonalIcon />
-                    </button>
-                  ))}
-                </div>
               </div>
             ) : (
               <div className="nia-message-list">
@@ -1652,32 +1630,6 @@ function formatBytes(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function starterPrompts(datasetLabel?: string | null) {
-  const label = datasetLabel || "this list";
-  return [
-    {
-      title: "Explore the records",
-      caption: `What data is available in ${label}?`,
-      prompt: "What information is available in this list?",
-    },
-    {
-      title: "Count records",
-      caption: "Start with a precise database question",
-      prompt: "How many records are in this list?",
-    },
-    {
-      title: "Browse communities",
-      caption: "See distinct places in the records",
-      prompt: "List the communities represented in the student records.",
-    },
-    {
-      title: "Find a person",
-      caption: "Search names naturally",
-      prompt: "Find students named Samuel and show me the matching records.",
-    },
-  ];
-}
-
 
 
 function defaultDatasetId(datasets: Dataset[]): number | null {
@@ -1765,7 +1717,6 @@ function ComposeIcon() { return <Icon path="M12 5v14M5 12h14" />; }
 function ChevronIcon() { return <Icon path="M9 10l3 3 3-3" className="h-4 w-4" />; }
 function VoiceIcon() { return <Icon path="M12 15a3 3 0 003-3V7a3 3 0 10-6 0v5a3 3 0 003 3zm5-3a5 5 0 01-10 0M12 17v3M9 20h6" />; }
 function ArrowUpIcon() { return <Icon path="M12 19V5M6.5 10.5L12 5l5.5 5.5" className="h-4 w-4" />; }
-function ArrowDiagonalIcon() { return <Icon path="M8 16L16 8M10 8h6v6" className="h-4 w-4" />; }
 function CopyIcon() { return <Icon path="M9 9h9v9H9zM6 15H5V5h10v1" />; }
 function FlagIcon() { return <Icon path="M6 20V5h11l-2 3.5L17 12H6" className="h-4 w-4" />; }
 function MoreIcon() { return <Icon path="M12 6h0M12 12h0M12 18h0" className="h-4 w-4" />; }

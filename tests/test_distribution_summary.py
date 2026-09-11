@@ -111,6 +111,20 @@ def test_a_count_and_a_breakdown_under_different_conditions_are_kept_apart():
     assert "| Place 00 | 100 |" in answer
 
 
+def test_the_same_answer_from_two_identical_actions_is_said_once():
+    first = _spread(_places(3))
+    second = ActionResult(
+        action_id="a2",
+        goal="rank",
+        file_ids=(49,),
+        ranked_groups=_places(3),
+        group_fields=("community", None),
+        grouped_field="community",
+    )
+    answer = _answer(first, second)
+    assert answer.count("| Place 00 | 100 |") == 1
+
+
 def test_a_word_count_names_the_field_and_the_words_it_matched():
     """ "0 students" alone hid that the words were looked for in the wrong field."""
     predicate = Predicate(

@@ -116,14 +116,18 @@ def format_deterministic_answer(
         if merged is not None:
             return merged
         verbose = len(result.action_results) == 1
-        parts = [
-            part
-            for part in (
-                _format_action(action, plan, catalog, verbose=verbose)
-                for action in result.action_results
+        # A plan that asks the same thing twice -- a planner and a reviewer each adding the
+        # action -- should not print the same answer twice.
+        parts = list(
+            dict.fromkeys(
+                part
+                for part in (
+                    _format_action(action, plan, catalog, verbose=verbose)
+                    for action in result.action_results
+                )
+                if part
             )
-            if part
-        ]
+        )
         if (
             roster is not None
             and parts

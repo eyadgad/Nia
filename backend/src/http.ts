@@ -213,7 +213,8 @@ Bun.serve({
         selected_file_id: chat.fileID,
         selected_dataset_label: chat.label,
         legacy_unscoped: false,
-        turns: chat.turns,
+        // Evidence IDs stay on the server; without source fields the frontend's chips open empty panels.
+        turns: chat.turns.map(({ role, text }) => ({ role, text })),
       })
     }
     if (conversationMatch && request.method === "PATCH") {
@@ -288,8 +289,8 @@ Bun.serve({
               reasoning_calls: 0,
               facts: [],
               rows: [],
-              citations,
-              evidence: answer.evidence.map((item) => ({ source_id: item.id, file_id: fileID })),
+              citations: [],
+              evidence: [],
               conversation_id: chat.id,
               selected_file_id: fileID,
             })

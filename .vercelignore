@@ -1,0 +1,4 @@
+# Vercel deploys only the Next.js app. Uploading the root package.json makes npm treat
+# frontend/ as part of the Bun workspace and fail on "workspace:*" dependencies.
+/*
+!/frontend

@@ -281,7 +281,42 @@ Bun.serve({
       })
     }
 
-    if (request.method === "POST" && url.pathname === "/api/assistant/feedback") return json(request, { ok: true })
+    if (request.method === "POST" && url.pathname === "/api/assistant/feedback") {
+      const body = (await request.json().catch(() => null)) as {
+        comment?: string
+        reporter_name?: string
+        conversation_id?: string | null
+        tz_offset_minutes?: number
+        attachments?: { filename?: string; content_type?: string; data_base64?: string }[]
+      } | null
+      if (!body) return json(request, { detail: "invalid report" }, 400)
+      // Chats live only in memory, so the report carries the conversation it is about. One JSON line
+      // per report keeps them searchable in the platform log; attachment bytes stay out of the log.
+      const chat = body.conversation_id ? chats.get(body.conversation_id) : undefined
+      console.log(
+        `REPORT ${JSON.stringify({
+          at: new Date().toISOString(),
+          principal: principal(request),
+          reporter: body.reporter_name?.slice(0, 200) ?? "",
+          comment: body.comment?.slice(0, 4000) ?? "",
+          tz_offset_minutes: body.tz_offset_minutes,
+          conversation: chat
+            ? {
+                id: chat.id,
+                title: chat.title,
+                list: chat.label,
+                turns: chat.turns.slice(-20).map((turn) => ({ role: turn.role, text: turn.text.slice(0, 2000) })),
+              }
+            : (body.conversation_id ?? null),
+          attachments: (body.attachments ?? []).map((item) => ({
+            filename: item.filename,
+            content_type: item.content_type,
+            bytes: Math.floor(((item.data_base64?.length ?? 0) * 3) / 4),
+          })),
+        })}`,
+      )
+      return json(request, { ok: true })
+    }
     return json(request, { detail: "not found" }, 404)
   },
 })

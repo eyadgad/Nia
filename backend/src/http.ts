@@ -1,6 +1,6 @@
 // HTTP API the Next.js frontend calls on port 8000. Research answers go through ResearchHost.
 import { randomBytes } from "node:crypto"
-import { mkdtemp } from "node:fs/promises"
+import { mkdir, mkdtemp, rename } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { ResearchHost } from "./host"
@@ -31,7 +31,27 @@ const separator = model.indexOf("/")
 if (separator < 1) throw new Error("NIA_MODEL must be provider/model-id")
 const provider = model.slice(0, separator)
 const effort = process.env.NIA_REASONING_EFFORT?.trim()
-const directory = await mkdtemp(path.join(os.tmpdir(), "nia-http-"))
+// NIA_STATE (a persistent volume when hosted) keeps chats and their research sessions across
+// restarts and deploys; without it everything lives in a fresh temporary directory.
+const directory = process.env.NIA_STATE
+  ? path.resolve(process.env.NIA_STATE)
+  : await mkdtemp(path.join(os.tmpdir(), "nia-http-"))
+await mkdir(directory, { recursive: true, mode: 0o700 })
+const chatsPath = path.join(directory, "chats.json")
+if (await Bun.file(chatsPath).exists())
+  for (const chat of (await Bun.file(chatsPath).json()) as Chat[]) chats.set(chat.id, chat)
+let saving = Promise.resolve()
+// Writes are queued so concurrent requests never interleave, and land via rename so a crash
+// mid-write leaves the previous file intact.
+function saveChats() {
+  saving = saving
+    .then(async () => {
+      await Bun.write(`${chatsPath}.tmp`, JSON.stringify([...chats.values()]))
+      await rename(`${chatsPath}.tmp`, chatsPath)
+    })
+    .catch((error) => console.error("could not save chats", error))
+  return saving
+}
 const providersPath = path.join(directory, "provider.json")
 await Bun.write(
   providersPath,
@@ -201,10 +221,12 @@ Bun.serve({
       if (!chat) return json(request, { detail: "not found" }, 404)
       const body = (await request.json()) as { title?: string }
       chat.title = body.title?.trim() || chat.title
+      await saveChats()
       return json(request, { ok: true })
     }
     if (conversationMatch && request.method === "DELETE") {
       chats.delete(conversationMatch[1])
+      await saveChats()
       return json(request, { ok: true })
     }
 
@@ -245,7 +267,11 @@ Bun.serve({
               sessionID: (await host.create(fileID)).id,
               turns: [],
             }
+            // A chat saved before its research session's state was kept continues in a new session.
+            if (existing && !(await host.get(chat.sessionID).catch(() => undefined)))
+              chat.sessionID = (await host.create(chat.fileID)).id
             chats.set(chat.id, chat)
+            await saveChats()
             const answer = await host.prompt(chat.sessionID, question, (event) => {
               if (event.type !== "text") return
               if (event.reset) send("answer_reset", {})
@@ -253,6 +279,7 @@ Bun.serve({
             })
             const citations = answer.evidence.map((item) => item.id)
             chat.turns.push({ role: "user", text: question }, { role: "assistant", text: answer.text, citations })
+            await saveChats()
             // answer_completed carries the authoritative text; the frontend replaces the streamed draft with it.
             send("answer_completed", {
               status: "completed",

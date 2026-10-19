@@ -130,9 +130,13 @@ async function datasets() {
   }
 }
 
+// Loopback by default; hosted deployments set APP_HOST=0.0.0.0 and get their port from PORT.
+const hostname = process.env.APP_HOST ?? "127.0.0.1"
+const port = Number(process.env.APP_PORT ?? process.env.PORT ?? 8000)
+
 Bun.serve({
-  hostname: "127.0.0.1",
-  port: Number(process.env.APP_PORT ?? 8000),
+  hostname,
+  port,
   async fetch(request) {
     const url = new URL(request.url)
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(request) })
@@ -282,4 +286,4 @@ Bun.serve({
   },
 })
 
-console.log(`research api listening on http://127.0.0.1:${process.env.APP_PORT ?? 8000}`)
+console.log(`research api listening on http://${hostname}:${port}`)

@@ -56,8 +56,10 @@ export async function connect(input: Options) {
   const url = new URL(input.url)
   if (!["postgres:", "postgresql:"].includes(url.protocol))
     throw new Error("An explicit PostgreSQL profile is required")
-  if (input.ssl === "disable" && !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))
-    throw new Error("Remote PostgreSQL profiles require verify-full TLS")
+  // Railway's *.railway.internal names resolve only inside its encrypted private network, so they
+  // count as local; anything reachable from the internet still needs verify-full.
+  const local = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) || url.hostname.endsWith(".railway.internal")
+  if (input.ssl === "disable" && !local) throw new Error("Remote PostgreSQL profiles require verify-full TLS")
   // Own the pool in the host scope; never forward this profile into Session environment variables.
   const client = new SQL({ url: input.url, max: 4, connectionTimeout: 10, idleTimeout: 20, ssl: input.ssl })
   const query = async <A>(

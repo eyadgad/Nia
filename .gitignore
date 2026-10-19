@@ -12,3 +12,4 @@ testing/out/
 out/
 *.log
 prev-env.txt
+.vercel/

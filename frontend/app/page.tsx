@@ -573,6 +573,11 @@ export default function HomePage() {
         if (event.event === "retrieval_completed" || event.event === "computed_fact") {
           setLines((current) => updateLineProgress(current, assistantId, "Preparing the answer..."));
         }
+        if (event.event === "answer_reset") {
+          setLines((current) =>
+            current.map((line) => (line.id === assistantId ? { ...line, text: "" } : line))
+          );
+        }
         if (event.event === "answer_delta") {
           setLines((current) =>
             current.map((line) =>

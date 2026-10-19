@@ -1,50 +1,14 @@
-.env
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.egg-info/
-dist/
-build/
 node_modules/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+*.dump
+*.sqlite*
+profile.json
+providers.json
+testing/out/
 .next/
 out/
-.turbo/
 *.log
-.DS_Store
-Thumbs.db
-coverage/
-htmlcov/
-.coverage
-frontend/tsconfig.tsbuildinfo
-backend/.python-version
-*.pcm
-*.wav
-services/whisper/models/*.bin
-!services/whisper/models/.gitkeep
-
-# Local reference clones and database review artifacts
-repositories/
-database_review_work/
-database_review_outputs/
-docs/postgres_full.dump
-shingwauk_postgres_database_review.ipynb
-backend/app/_thread_tmp.py
-final_list_master.csv
-docs/*live-scoped*.json
-docs/regression_*.json
-docs/regression_*.md
-docs/*pipeline_results*.md
-docs/database-question-validation.md
-docs/pipeline-fixes.md
-.env.bench
-
-# Raw benchmark transcripts. These quote the records back -- expected answers for the
-# question matrix are real names from the death lists -- so they stay local, the same
-# way the review outputs and the database dump do. The summarised JSON beside them
-# carries the timings and the pass/fail classification without the rows.
-docs/*.stdout.txt
-docs/*.stderr.txt
+prev-env.txt

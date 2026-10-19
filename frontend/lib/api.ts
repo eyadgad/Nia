@@ -259,6 +259,7 @@ export type QueryEvent =
   | { event: "retrieval_completed"; data: Record<string, unknown> }
   | { event: "computed_fact"; data: Record<string, unknown> }
   | { event: "answer_delta"; data: { text: string } }
+  | { event: "answer_reset"; data: Record<string, never> }
   | { event: "citation"; data: { source_id: string; fields?: Record<string, unknown> } }
   | { event: "memory_update"; data: Record<string, unknown> }
   | { event: "answer_completed"; data: QueryResult };

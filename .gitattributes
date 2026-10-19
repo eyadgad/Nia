@@ -1,5 +1,2 @@
-# Shell scripts must keep LF endings whatever the checkout platform does. Git
-# rewrote infra/restart-tunnel.sh to CRLF on Windows and bash then refused to run
-# it -- "syntax error near unexpected token `$'do'" -- on the one script whose
-# whole job is recovering a downed deployment.
-*.sh text eol=lf
+# Keep shell scripts and dependency patches usable on every platform.
+* text=auto eol=lf

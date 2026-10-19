@@ -1,0 +1,21 @@
+{
+  "name": "@nia/frontend",
+  "version": "2.0.31",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./cli": "./src/cli.ts",
+    "./terminal": "./src/terminal/index.tsx",
+    "./terminal/view": "./src/terminal/view.tsx"
+  },
+  "dependencies": {
+    "@nia/backend": "workspace:*",
+    "@opencode/plugin": "workspace:*",
+    "@opencode/schema": "workspace:*",
+    "@opencode/theme": "workspace:*",
+    "@opentui/core": "catalog:",
+    "@opentui/solid": "catalog:",
+    "effect": "catalog:",
+    "solid-js": "catalog:"
+  }
+}

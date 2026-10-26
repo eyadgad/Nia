@@ -7,7 +7,6 @@ node_modules/
 *.sqlite*
 profile.json
 providers.json
-testing/out/
 .next/
 out/
 *.log
